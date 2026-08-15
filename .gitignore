@@ -1,0 +1,9 @@
+# misc files
+milestone_plans/
+.vscode/
+
+# object files
+obj/
+
+# executables
+bin/
