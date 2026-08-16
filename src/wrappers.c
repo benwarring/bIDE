@@ -6,6 +6,9 @@
 #include <termios.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "terminal.h"
 #include "wrappers.h"
@@ -45,6 +48,46 @@ int Write(int fd, const void * buf, size_t count) {
         p += w;
     }
     return (int)count;
+}
+
+/**
+ * Like Write, but returns -1 on error instead of dying, for callers that can
+ * recover. Loops on partial writes: write may legitimately return fewer bytes
+ * than requested, which for small files effectively never happens, which is
+ * exactly why that bug survives to production.
+ */
+ssize_t Writen(int fd, const void * buf, size_t count) {
+    const char *p = buf;
+    size_t left = count;
+
+    while (left > 0) {
+        ssize_t w = write(fd, p, left);
+        if (w == -1) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        left -= (size_t)w;
+        p += w;
+    }
+    return (ssize_t)count;
+}
+
+int Open(const char *path, int flags, mode_t mode) {
+    int fd;
+    while ((fd = open(path, flags, mode)) == -1 && errno == EINTR)
+        ;
+    return fd;
+}
+
+int Close(int fd) {
+    return close(fd);                                   // never retry on EINTR: fd may already be gone
+}
+
+int Ftruncate(int fd, off_t length) {
+    int r;
+    while ((r = ftruncate(fd, length)) == -1 && errno == EINTR)
+        ;
+    return r;
 }
 
 void Tcgetattr(int fd, struct termios *termios_p) {

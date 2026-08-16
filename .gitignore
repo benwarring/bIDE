@@ -1,6 +1,8 @@
 # misc files
 milestone_plans/
 .vscode/
+annoyances.md
+test_files/
 
 # object files
 obj/

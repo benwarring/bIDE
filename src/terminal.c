@@ -13,9 +13,16 @@ static struct termios orig_termios;
 
 volatile sig_atomic_t resize_pending = 0;
 
-// runs from atexit, so it calls tcsetattr directly: the wrapper would die() on
-// failure, and calling exit() from an exit handler is undefined behavior
+/* 1000 = report button presses, 1006 = SGR coordinates, which unlike the
+ * original encoding are plain decimal and so work past column 223. */
+#define MOUSE_ON  "\x1b[?1000h\x1b[?1006h"
+#define MOUSE_OFF "\x1b[?1006l\x1b[?1000l"
+
+// runs from atexit, so it uses tcsetattr and write directly: the wrappers die()
+// on failure, and calling exit() from an exit handler is undefined behavior
 static void disable_raw_mode(void) {
+    ssize_t n = write(STDOUT_FILENO, MOUSE_OFF, sizeof(MOUSE_OFF) - 1);
+    (void)n;                                            // failing here changes nothing we can act on
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);  // restore original terminal settings
 }
 
@@ -43,6 +50,8 @@ void enable_raw_mode(void) {
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
     Tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+    Write(STDOUT_FILENO, MOUSE_ON, sizeof(MOUSE_ON) - 1);
 }
 
 /**

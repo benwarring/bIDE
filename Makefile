@@ -1,5 +1,7 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -std=c17 -g -D_DEFAULT_SOURCE -I$(INCLUDE)
+# -MMD -MP emit a .d file per object listing the headers it included, so editing
+# a header rebuilds everything that includes it
+CFLAGS = -Wall -Wextra -pedantic -std=c17 -g -D_DEFAULT_SOURCE -I$(INCLUDE) -MMD -MP
 
 SRC = src
 OBJ = obj
@@ -8,6 +10,7 @@ INCLUDE = include
 
 SRCS = $(wildcard $(SRC)/*.c)
 OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(SRCS))
+DEPS = $(OBJS:.o=.d)
 TARGET = $(BIN)/main
 
 all: $(TARGET)
@@ -20,7 +23,9 @@ $(OBJ)/%.o: $(SRC)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+-include $(DEPS)
+
 .PHONY: all clean
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET)
