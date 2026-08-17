@@ -9,6 +9,7 @@
 #include "buffer.h"
 #include "command.h"
 #include "editor.h"
+#include "lsp.h"
 #include "render.h"
 #include "terminal.h"
 #include "undo.h"
@@ -238,6 +239,15 @@ static void clamp_pos(bpos *p) {
     if (len < 0) len = 0;
     if (p->cx > len) p->cx = len;
     if (p->cx < 0) p->cx = 0;
+}
+
+void editor_clamp_cursor(void) {
+    View *v = editor_view();
+
+    bpos p = {v->cy, v->cx};
+    clamp_pos(&p);
+    v->cy = p.cy;
+    v->cx = p.cx;
 }
 
 static void op_left(bpos *p) {
@@ -656,9 +666,15 @@ char *editor_prompt(const char *prompt, void (*callback)(char *, int)) {
 /* ------------------------------------------------------------ dispatch --- */
 
 int editor_process_keypress(int c) {
+    /* The completion popup gets first refusal, and refuses nearly everything: it
+     * wants the arrows, Tab, Enter and Escape, and lets every other key straight
+     * through to the buffer underneath. That is what makes it non-modal. */
+    if (lsp_completion_key(c)) return 1;
+
     // key dispatch is now two lookups in data, not a switch: find the binding,
     // find its command, invoke it
     if (command_dispatch(c)) {
+        lsp_completion_sync();                          // the cursor may have walked off
         return command_quit_requested() ? 0 : 1;
     }
 
@@ -666,6 +682,10 @@ int editor_process_keypress(int c) {
     if (c == '\t' || (c >= 32 && c < 127)) {
         editor_insert_text(c);
         command_reset_quit();
+
+        // the keystroke lands first, then the list catches up with it
+        lsp_completion_sync();
+        lsp_completion_maybe_trigger(c);
     }
     return 1;
 }

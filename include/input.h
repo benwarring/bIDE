@@ -54,6 +54,14 @@ void editor_mouse_click(void);
 void editor_wheel_up(void);
 void editor_wheel_down(void);
 
+/**
+ * Pulls the primary cursor back inside the buffer. Anything that moves the
+ * cursor by computing a position rather than stepping it — a definition jump, a
+ * diagnostic jump, a completion insert — needs this, because the target came
+ * from somewhere that does not know how long the line is.
+ */
+void editor_clamp_cursor(void);
+
 void editor_cursor_add_above(void);
 void editor_cursor_add_below(void);
 void editor_cursor_add_next(void);

@@ -8,6 +8,7 @@
 
 #include "buffer.h"
 #include "editor.h"
+#include "lsp.h"
 #include "syntax.h"
 #include "terminal.h"
 #include "undo.h"
@@ -112,14 +113,13 @@ static char *resolve(const char *filename) {
     return strdup(filename);
 }
 
+/* Zeroed wholesale rather than field by field. Every correct value here is a
+ * zero or a NULL, and listing them individually means a field added later —
+ * `lsp` was exactly this — is left holding garbage that only shows up as a
+ * crash somewhere else entirely. */
 static Buffer *buffer_new(void) {
     Buffer *b = Malloc(sizeof(Buffer));
-    b->row = NULL;
-    b->numrows = 0;
-    b->filename = NULL;
-    b->path = NULL;
-    b->crlf = 0;
-    b->syntax = NULL;
+    memset(b, 0, sizeof(*b));
     b->undo = undo_create();
     return b;
 }
@@ -197,6 +197,7 @@ int buffer_open(const char *filename) {
 
     attach(buffer_new());
     load_into_current(filename);
+    lsp_open_document(editor_buffer());                 // starts a server if this language has one
     return E.active;
 }
 
@@ -234,6 +235,9 @@ void buffer_cycle(int delta) {
 }
 
 static void free_buffer(Buffer *b) {
+    lsp_close_document(b);                              // tell the server before the contents go
+    lsp_free_document(b);
+
     for (int i = 0; i < b->numrows; i++) {
         free_row(&b->row[i]);                           // chars, render and hl for every line
     }
@@ -282,6 +286,10 @@ void buffer_free(void) {
 void buffer_set_filename(const char *filename) {
     Buffer *b = editor_buffer();
 
+    // the server knows this document by its old URI; that document is going away
+    lsp_close_document(b);
+    lsp_free_document(b);
+
     free(b->filename);
     free(b->path);
     b->filename = filename ? strdup(filename) : NULL;
@@ -289,6 +297,8 @@ void buffer_set_filename(const char *filename) {
 
     syntax_select(b->filename);                         // save-as can change the language
     syntax_update_all();
+
+    lsp_open_document(b);                               // and may be a different language entirely
 }
 
 /**
@@ -397,6 +407,37 @@ int buffer_get_line(int idx, char *dst, size_t dstsize) {
     return copy_out(b->row[idx].chars, b->row[idx].size, dst, dstsize);
 }
 
+int buffer_num_lines_of(const Buffer *b) {
+    return b ? b->numrows : 0;
+}
+
+int buffer_get_line_of(const Buffer *b, int idx, char *dst, size_t dstsize) {
+    if (b == NULL || idx < 0 || idx >= b->numrows || dstsize == 0) return -1;
+    return copy_out(b->row[idx].chars, b->row[idx].size, dst, dstsize);
+}
+
+char *buffer_text_of(const Buffer *b, size_t *len) {
+    if (b == NULL) {
+        if (len) *len = 0;
+        return strdup("");
+    }
+
+    size_t total = 0;
+    for (int i = 0; i < b->numrows; i++) total += (size_t)b->row[i].size + 1;
+
+    char *buf = Malloc(total + 1);
+    char *p = buf;
+    for (int i = 0; i < b->numrows; i++) {
+        memcpy(p, b->row[i].chars, (size_t)b->row[i].size);
+        p += b->row[i].size;
+        *p++ = '\n';                                    // the protocol wants \n whatever the file uses
+    }
+    *p = '\0';
+
+    if (len) *len = (size_t)(p - buf);
+    return buf;
+}
+
 int buffer_get_rline(int idx, char *dst, size_t dstsize) {
     Buffer *b = editor_buffer();
     if (idx < 0 || idx >= b->numrows || dstsize == 0) return -1;
@@ -477,9 +518,14 @@ void buffer_set_hook(buffer_hook_fn fn, void *ctx) {
 }
 
 /* Fired after the mutation lands, so a hook that reads the buffer sees the new
- * state. Paired with undo_record: one reports the inverse, the other the shift. */
+ * state. Paired with undo_record: one reports the inverse, the other the shift.
+ *
+ * This is also where the language server learns the document changed. Putting it
+ * here rather than at the keystroke level means undo, redo and completion
+ * insertion all count as edits without any of them having to remember to say so. */
 static void notify(undo_type op, int cy, int cx) {
     if (hook) hook(op, cy, cx, hook_ctx);
+    lsp_touch_document(editor_buffer());
 }
 
 bpos buffer_insert_char(int cy, int cx, int c) {

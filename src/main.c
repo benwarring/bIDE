@@ -3,10 +3,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <poll.h>
+
 #include "buffer.h"
 #include "command.h"
 #include "editor.h"
 #include "input.h"
+#include "lsp.h"
 #include "render.h"
 #include "terminal.h"
 #include "undo.h"
@@ -48,37 +51,83 @@ void editor_init(void) {
 }
 
 static void cleanup(void) {
+    lsp_stop_all();                                     // handshake, then reap, before anything is freed
+    lsp_features_free();
     buffer_free();                                      // every buffer's rows, undo stacks and views
     render_free();
     command_free();                                     // the list widget's scratch and the file cache
 }
 
+/**
+ * The loop no longer assumes it is in control.
+ *
+ * Until now it blocked on a keystroke, because nothing could happen unless the
+ * user made it happen. A language server replies whenever it likes — sometimes
+ * in two milliseconds, sometimes four seconds into indexing — so the loop now
+ * waits on stdin *and* every server pipe at once and handles whichever speaks
+ * first.
+ *
+ * Two consequences worth naming. The timeout is computed rather than fixed, so
+ * the process sleeps until there is genuinely something to do instead of
+ * spinning. And rendering is now conditional on something having changed:
+ * redrawing on every wake would flicker the cursor several times a second while
+ * a server chatters.
+ */
 static void run(void) {
     while (1) {
         if (resize_pending) {
             resize_pending = 0;
             update_window_size();
+            editor_request_redraw();
         }
-        editor_refresh_screen();
 
-        int c;
-        while ((c = editor_read_key()) == -1 && !resize_pending)
-            ;
-        if (c == -1) continue;                          // woken by a resize, redraw
+        if (editor_take_redraw()) editor_refresh_screen();
 
-        if (!editor_process_keypress(c)) break;
+        struct pollfd fds[1 + LSP_MAX_FDS];
+        fds[0].fd = STDIN_FILENO;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+
+        int nfds = 1 + lsp_pollfds(&fds[1], LSP_MAX_FDS);
+
+        /* Sleep exactly as long as the nearest thing that wants waking: a
+         * debounced change to flush, or the status message expiring. -1 means
+         * nothing is pending and only input can wake us. */
+        int timeout = lsp_next_timeout_ms();
+        int redraw_at = render_next_timeout_ms();
+        if (timeout == -1 || (redraw_at != -1 && redraw_at < timeout)) {
+            if (redraw_at != -1) timeout = redraw_at;
+        }
+
+        if (Poll(fds, (nfds_t)nfds, timeout) == -1) die("poll");
+
+        lsp_dispatch(&fds[1], nfds - 1);
+        lsp_tick();
+
+        // the status message expiring changes the screen with no input at all
+        if (render_next_timeout_ms() == -1 && E.statusmsg[0] != '\0') editor_request_redraw();
+
+        if (fds[0].revents & POLLIN) {
+            int c = editor_read_key();
+            if (c != -1) {
+                editor_request_redraw();
+                if (!editor_process_keypress(c)) break;
+            }
+        }
     }
 
-    Write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+    // nothing to clear on the way out: leaving the alternate screen puts the
+    // terminal back exactly as it was found, which clearing could not do
 }
 
 int main(int argc, char *argv[]) {
     enable_raw_mode();
     editor_init();
+    lsp_init();
 
     buffer_open(argc >= 2 ? argv[1] : NULL);
     editor_set_status_message(
-        "HELP: Ctrl-S save | Ctrl-F find | Ctrl-Z undo | Ctrl-Y redo | Ctrl-X quit");
+        "HELP: Ctrl-S save | Ctrl-F find | Ctrl-K palette | Ctrl-X quit");
 
     run();
     cleanup();

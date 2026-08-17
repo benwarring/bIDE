@@ -21,11 +21,53 @@ typedef struct {
 
 void render_set_overlay(Overlay *o);
 
+/**
+ * A box anchored to a screen cell, floating *over* the text instead of replacing
+ * rows of it, with the real cursor left in the buffer where the user put it.
+ *
+ * The overlay above owns whole rows because it owns the keyboard too. This one
+ * appears while the user is still typing into the text underneath, so it has to
+ * cover as little as it can and must not move the cursor.
+ */
+typedef struct {
+    int active;
+    char **items;               // display strings, already filtered by the caller
+    int nitems;
+    int selected;
+    int top;                    // first visible item, for scrolling
+    int height;                 // rows of items to draw
+    int width;
+    int row, col;               // the screen cell it hangs from, 0-indexed
+} Popup;
+
+void render_set_popup(Popup *p);
+
 void editor_scroll(void);
 
 void editor_refresh_screen(void);
 
 void editor_set_status_message(const char *fmt, ...);
+
+/**
+ * Marks the screen stale.
+ *
+ * The loop used to render every iteration, which was free when the only way to
+ * reach the top of it was a keypress. Once poll wakes on a timer or a server
+ * message it is no longer free, and redrawing on every wake makes the cursor
+ * visibly flicker. So: anything that changes what the screen should show says
+ * so, and the loop renders only when something has.
+ */
+void editor_request_redraw(void);
+
+/** Returns whether a redraw is due, clearing the flag. */
+int editor_take_redraw(void);
+
+/**
+ * Milliseconds until the screen needs redrawing on its own with no input at all,
+ * or -1 if never. Only the status message expiring qualifies: it disappears
+ * after a timeout, which nothing else would wake the loop to notice.
+ */
+int render_next_timeout_ms(void);
 
 void render_free(void);
 

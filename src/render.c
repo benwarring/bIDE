@@ -8,6 +8,7 @@
 #include "render.h"
 #include "buffer.h"
 #include "editor.h"
+#include "lsp.h"
 #include "syntax.h"
 #include "undo.h"
 #include "wrappers.h"
@@ -64,6 +65,90 @@ static Overlay *overlay = NULL;
 
 void render_set_overlay(Overlay *o) {
     overlay = (o && o->active) ? o : NULL;
+    editor_request_redraw();
+}
+
+static Popup *popup = NULL;
+
+void render_set_popup(Popup *p) {
+    popup = (p && p->active) ? p : NULL;
+    editor_request_redraw();
+}
+
+/**
+ * Drawn last, by absolute cursor addressing, rather than spliced into the rows
+ * as they are built: the rows carry color escapes, so there is no honest way to
+ * overwrite "columns 12 through 30" of one after the fact. Positioning each box
+ * row instead costs a few escape sequences and still leaves in the single write
+ * the rest of the frame is composed for.
+ */
+static void draw_popup(abuf *ab) {
+    if (popup == NULL || popup->nitems == 0) return;
+
+    int width = popup->width;
+    if (width > E.screencols) width = E.screencols;
+    if (width < 1) return;
+
+    int height = popup->height;
+    if (height > popup->nitems - popup->top) height = popup->nitems - popup->top;
+    if (height < 1) return;
+
+    // below the anchor by default, flipped above when there is no room down there
+    int row = popup->row + 1;
+    if (row + height > E.screenrows) {
+        row = popup->row - height;
+        if (row < 0) {                                  // nowhere comfortable: clamp
+            row = 0;
+            if (height > E.screenrows) height = E.screenrows;
+        }
+    }
+
+    int col = popup->col;
+    if (col + width > E.screencols) col = E.screencols - width;
+    if (col < 0) col = 0;
+
+    for (int i = 0; i < height; i++) {
+        int idx = popup->top + i;
+        if (idx >= popup->nitems) break;
+
+        char pos[32];
+        snprintf(pos, sizeof(pos), "\x1b[%d;%dH", row + i + 1, col + 1);
+        ab_appendstr(ab, pos);
+
+        ab_appendstr(ab, idx == popup->selected ? "\x1b[7m" : "\x1b[100m");
+
+        char line[512];
+        snprintf(line, sizeof(line), " %s", popup->items[idx]);
+
+        int len = (int)strlen(line);
+        if (len > width) len = width;
+        ab_append(ab, line, (size_t)len);
+        for (int j = len; j < width; j++) ab_appendstr(ab, " ");
+
+        ab_appendstr(ab, "\x1b[m");
+    }
+}
+
+static int redraw_pending = 1;                          // the first frame is always due
+
+void editor_request_redraw(void) {
+    redraw_pending = 1;
+}
+
+int editor_take_redraw(void) {
+    int due = redraw_pending;
+    redraw_pending = 0;
+    return due;
+}
+
+int render_next_timeout_ms(void) {
+    if (E.statusmsg[0] == '\0') return -1;
+
+    long age = (long)(time(NULL) - E.statusmsg_time);
+    if (age >= STATUSMSG_TIMEOUT) return -1;            // already gone; nothing left to wait for
+
+    // +1 so the wake lands after the second ticks over rather than on the boundary
+    return (int)((STATUSMSG_TIMEOUT - age) * 1000 + 1);
 }
 
 void render_free(void) {
@@ -145,6 +230,27 @@ static void draw_welcome(abuf *ab) {
  *
  * The reset is unconditional: skip it and the color bleeds into the line's text.
  */
+/* A letter rather than an underline: true squiggles need undercurl, which many
+ * terminals do not support, and a marker in a column that already exists needs
+ * nothing at all. */
+static char diag_marker(int severity) {
+    switch (severity) {
+        case LSP_ERROR:   return 'E';
+        case LSP_WARNING: return 'W';
+        case LSP_INFO:    return 'i';
+        default:          return 'h';
+    }
+}
+
+static int diag_color(int severity) {
+    switch (severity) {
+        case LSP_ERROR:   return 31;                    // red
+        case LSP_WARNING: return 33;                    // yellow
+        case LSP_INFO:    return 34;                    // blue
+        default:          return 90;                    // grey
+    }
+}
+
 static void draw_gutter(abuf *ab, int filerow) {
     if (E.gutter == 0) return;
 
@@ -155,11 +261,27 @@ static void draw_gutter(abuf *ab, int filerow) {
         return;
     }
 
-    snprintf(num, sizeof(num), "%*d | ", E.gutter - GUTTER_SEP_W, filerow + 1);
     int current = (filerow == editor_view()->cy);
+    int severity = lsp_line_severity(editor_buffer(), filerow);
+
+    snprintf(num, sizeof(num), "%*d ", E.gutter - GUTTER_SEP_W, filerow + 1);
     if (!current) ab_appendstr(ab, "\x1b[90m");
     ab_appendstr(ab, num);
     if (!current) ab_appendstr(ab, "\x1b[39m");
+
+    /* The separator column doubles as the diagnostic marker. It costs no extra
+     * width — so nothing shifts when a diagnostic appears or clears — and it
+     * sits right where the eye already is when reading a line number. */
+    if (severity) {
+        char buf[24];
+        int n = snprintf(buf, sizeof(buf), "\x1b[1;%dm%c\x1b[m ",
+                         diag_color(severity), diag_marker(severity));
+        ab_append(ab, buf, (size_t)n);
+    } else {
+        if (!current) ab_appendstr(ab, "\x1b[90m");
+        ab_appendstr(ab, "| ");
+        if (!current) ab_appendstr(ab, "\x1b[39m");
+    }
 }
 
 /**
@@ -302,12 +424,14 @@ static void draw_status_bar(abuf *ab) {
                        b->filename ? b->filename : "[No Name]", buffer_num_lines(),
                        undo_is_dirty() ? "(modified)" : "");
 
-    View *vv = editor_view();
-    int rlen = vv->nextra > 0
-        ? snprintf(rstatus, sizeof(rstatus), "%d cursors | %s | %d/%d",
-                   vv->nextra + 1, syntax_filetype(), v->cy + 1, buffer_num_lines())
-        : snprintf(rstatus, sizeof(rstatus), "%s | %d/%d",
-                   syntax_filetype(), v->cy + 1, buffer_num_lines());
+    const char *lsp = lsp_status(b);
+    char cursors[32] = "";
+    if (v->nextra > 0) snprintf(cursors, sizeof(cursors), "%d cursors | ", v->nextra + 1);
+
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%s%s%s%s | %d/%d",
+                        cursors,
+                        lsp ? lsp : "", lsp ? " | " : "",
+                        syntax_filetype(), v->cy + 1, buffer_num_lines());
 
     if (len > E.screencols) len = E.screencols;
     ab_append(ab, status, (size_t)len);
@@ -332,7 +456,25 @@ static void draw_message_bar(abuf *ab) {
     if (msglen > E.screencols) msglen = E.screencols;
     if (msglen && time(NULL) - E.statusmsg_time < STATUSMSG_TIMEOUT) {
         ab_append(ab, E.statusmsg, (size_t)msglen);
+        return;
     }
+
+    /* With nothing else to say, the line shows the diagnostic under the cursor.
+     * The gutter marker says *that* something is wrong on a line; this says
+     * what, without needing a popup or a second keystroke. */
+    View *v = editor_view();
+    const char *diag = lsp_line_message(editor_buffer(), v->cy);
+    if (diag == NULL) return;
+
+    int severity = lsp_line_severity(editor_buffer(), v->cy);
+    char buf[16];
+    int n = snprintf(buf, sizeof(buf), "\x1b[%dm", diag_color(severity));
+    ab_append(ab, buf, (size_t)n);
+
+    int len = (int)strlen(diag);
+    if (len > E.screencols) len = E.screencols;
+    ab_append(ab, diag, (size_t)len);
+    ab_appendstr(ab, "\x1b[39m");
 }
 
 void editor_refresh_screen(void) {
@@ -346,6 +488,7 @@ void editor_refresh_screen(void) {
     draw_rows(&ab);
     draw_status_bar(&ab);
     draw_message_bar(&ab);
+    draw_popup(&ab);                                    // floats over what is already there
 
     // the one place 0-indexed state becomes 1-indexed terminal coordinates
     View *v = editor_view();
@@ -371,4 +514,5 @@ void editor_set_status_message(const char *fmt, ...) {
     vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
     va_end(ap);
     E.statusmsg_time = time(NULL);
+    editor_request_redraw();
 }

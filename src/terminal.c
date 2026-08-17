@@ -18,10 +18,30 @@ volatile sig_atomic_t resize_pending = 0;
 #define MOUSE_ON  "\x1b[?1000h\x1b[?1006h"
 #define MOUSE_OFF "\x1b[?1006l\x1b[?1000l"
 
+/* 1049 is the alternate screen buffer: a second, scrollback-less screen that
+ * the terminal swaps in whole. Entering saves the real screen and hands us a
+ * blank one; leaving restores the real screen exactly as it was. Every frame we
+ * draw lands there and nothing reaches the scrollback, which is what stops a
+ * session leaving a wall of editor frames behind in the terminal history.
+ *
+ * This is how vim and less behave, and it is a single pair of sequences rather
+ * than any clearing of our own — clearing with \x1b[2J would still scroll the
+ * old contents away permanently. */
+#define SCREEN_ON  "\x1b[?1049h"
+#define SCREEN_OFF "\x1b[?1049l"
+
+/* Set once the original settings have actually been captured, so a die() during
+ * startup does not restore a struct that was never filled in, and cleared once
+ * they are back so the atexit handler is a no-op after die() has already run. */
+static int termios_saved = 0;
+
 // runs from atexit, so it uses tcsetattr and write directly: the wrappers die()
 // on failure, and calling exit() from an exit handler is undefined behavior
-static void disable_raw_mode(void) {
-    ssize_t n = write(STDOUT_FILENO, MOUSE_OFF, sizeof(MOUSE_OFF) - 1);
+static void restore_terminal(void) {
+    if (!termios_saved) return;
+    termios_saved = 0;
+
+    ssize_t n = write(STDOUT_FILENO, MOUSE_OFF SCREEN_OFF, sizeof(MOUSE_OFF SCREEN_OFF) - 1);
     (void)n;                                            // failing here changes nothing we can act on
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);  // restore original terminal settings
 }
@@ -30,7 +50,13 @@ int die(const char *s) {
     static int dying = 0;
     if (!dying) {
         dying = 1;                                      // Write() calls die() on failure; don't recurse
-        Write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);       // clear screen and home cursor
+
+        /* Leave the alternate screen *before* reporting, or the message is
+         * printed onto a screen that is about to be discarded and the user sees
+         * the editor vanish with no explanation. Restoring the termios first
+         * also puts OPOST back, without which the newline has no carriage
+         * return and the text walks off to the right. */
+        restore_terminal();
     }
     perror(s);
     exit(1);
@@ -38,7 +64,8 @@ int die(const char *s) {
 
 void enable_raw_mode(void) {
     Tcgetattr(STDIN_FILENO, &orig_termios);             // get current terminal settings
-    atexit(disable_raw_mode);                           // register disable_raw_mode to be called at exit
+    termios_saved = 1;
+    atexit(restore_terminal);                           // register restore_terminal to be called at exit
 
     struct termios raw = orig_termios;
 
@@ -51,7 +78,7 @@ void enable_raw_mode(void) {
     raw.c_cc[VTIME] = 1;
     Tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
-    Write(STDOUT_FILENO, MOUSE_ON, sizeof(MOUSE_ON) - 1);
+    Write(STDOUT_FILENO, SCREEN_ON MOUSE_ON, sizeof(SCREEN_ON MOUSE_ON) - 1);
 }
 
 /**

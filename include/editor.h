@@ -36,6 +36,7 @@ typedef struct {
 } bpos;
 
 typedef struct UndoState UndoState;         // opaque, owned by undo.c
+typedef struct LspDoc LspDoc;               // opaque, owned by lsp.c
 struct editorSyntax;                        // defined in syntax.h
 
 /**
@@ -50,6 +51,7 @@ typedef struct {
     int crlf;                   // the file's original line ending, restored on save
     const struct editorSyntax *syntax;
     UndoState *undo;
+    LspDoc *lsp;                // server-side view of this file: version, diagnostics
 } Buffer;
 
 /**

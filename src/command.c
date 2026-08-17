@@ -8,6 +8,7 @@
 #include "files.h"
 #include "input.h"
 #include "list.h"
+#include "lsp.h"
 #include "render.h"
 #include "search.h"
 #include "undo.h"
@@ -128,6 +129,15 @@ static const Command COMMANDS[] = {
     {"multicursor.clear", "Collapse to one cursor",     editor_cursor_collapse,
                                                         editor_has_extra_cursors},
 
+    {"lsp.definition",    "Go to definition",           lsp_goto_definition,    lsp_available},
+    {"lsp.back",          "Jump back",                  lsp_jump_back,          lsp_have_jumps},
+    {"lsp.hover",         "Show hover documentation",   lsp_hover,              lsp_available},
+    {"lsp.complete",      "Complete at cursor",         lsp_complete,           lsp_available},
+    {"lsp.diag.next",     "Next diagnostic",            lsp_next_diagnostic,    lsp_available},
+    {"lsp.diag.prev",     "Previous diagnostic",        lsp_prev_diagnostic,    lsp_available},
+    {"lsp.log",           "Open LSP message log",       lsp_open_log,           NULL},
+    {"lsp.restart",       "Restart language server",    lsp_restart,            NULL},
+
     {"editor.palette",    "Command palette...",         cmd_palette,            NULL},
     {"editor.quit",       "Quit",                       cmd_quit,               NULL},
 };
@@ -175,6 +185,13 @@ static const Binding BINDINGS[] = {
     {CTRL_ARROW_DOWN,   "multicursor.below"},
     {CTRL_KEY('d'),     "multicursor.next"},
     {'\x1b',            "multicursor.clear"},
+
+    {CTRL_KEY('g'),     "lsp.definition"},
+    {CTRL_KEY('t'),     "lsp.back"},
+    {CTRL_KEY('l'),     "lsp.hover"},
+    {CTRL_KEY(' '),     "lsp.complete"},                // Ctrl-Space arrives as NUL
+    {CTRL_KEY('e'),     "lsp.diag.next"},
+    {CTRL_KEY('a'),     "lsp.diag.prev"},
 
     {CTRL_KEY('k'),     "editor.palette"},
     {CTRL_KEY('x'),     "editor.quit"},

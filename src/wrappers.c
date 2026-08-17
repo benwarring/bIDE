@@ -8,7 +8,10 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <poll.h>
 #include <fcntl.h>
+#include <time.h>
 
 #include "terminal.h"
 #include "wrappers.h"
@@ -133,4 +136,74 @@ void *Realloc(void *ptr, size_t size) {
     void *p = realloc(ptr, size);
     if (p == NULL) die("realloc");
     return p;
+}
+
+/* ------------------------------------------- subprocess and multiplexing --- */
+
+int Pipe(int fds[2]) {
+    return pipe(fds);
+}
+
+pid_t Fork(void) {
+    return fork();
+}
+
+int Dup2(int oldfd, int newfd) {
+    int r;
+    while ((r = dup2(oldfd, newfd)) == -1 && errno == EINTR)
+        ;
+    return r;
+}
+
+int Execvp(const char *file, char *const argv[]) {
+    return execvp(file, argv);                          // returns only if it failed
+}
+
+/**
+ * EINTR here is not an error: SIGWINCH fires on every window resize and would
+ * otherwise look like a poll failure. Retrying returns to the caller with the
+ * resize flag already set, so the next iteration redraws.
+ */
+int Poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    int r;
+    while ((r = poll(fds, nfds, timeout)) == -1 && errno == EINTR)
+        ;
+    return r;
+}
+
+int SetNonblock(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+pid_t Waitpid(pid_t pid, int *status, int options) {
+    pid_t r;
+    while ((r = waitpid(pid, status, options)) == -1 && errno == EINTR)
+        ;
+    return r;
+}
+
+int Kill(pid_t pid, int sig) {
+    return kill(pid, sig);
+}
+
+/**
+ * SIG_IGN rather than a handler: writing to a server that has already exited
+ * raises SIGPIPE, whose default action terminates the editor with no message at
+ * all. Ignoring it turns that into a plain EPIPE from write, which the caller
+ * can see and act on.
+ */
+int IgnoreSignal(int signum) {
+    struct sigaction sa;
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    return sigaction(signum, &sa, NULL);
+}
+
+long MonotonicMs(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1) return 0;
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }

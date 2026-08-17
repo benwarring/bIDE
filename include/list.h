@@ -13,6 +13,13 @@
  */
 int list_select(const char *title, char **items, int nitems);
 
+/**
+ * The same box used to show text rather than choose from it: scrollable with the
+ * arrows, dismissed with any other key. Hover documentation is several lines
+ * more often than not, which the one-line message bar truncates badly.
+ */
+void list_message(const char *title, char **lines, int nlines);
+
 void list_free(void);
 
 #endif

@@ -7,6 +7,7 @@
 #include "editor.h"
 #include "fuzzy.h"
 #include "input.h"
+#include "popup.h"
 #include "render.h"
 #include "terminal.h"
 #include "wrappers.h"
@@ -59,6 +60,7 @@ static void refilter(const char *query, char **items, int nitems) {
 }
 
 int list_select(const char *title, char **items, int nitems) {
+    popup_close();                                      // a modal box supersedes the floating one
     char query[256];
     size_t qlen = 0;
     query[0] = '\0';
@@ -138,6 +140,54 @@ int list_select(const char *title, char **items, int nitems) {
             top = 0;
         }
     }
+}
+
+void list_message(const char *title, char **lines, int nlines) {
+    if (nlines <= 0) return;
+    popup_close();
+
+    int top = 0;
+
+    Overlay ov;
+    memset(&ov, 0, sizeof(ov));
+    ov.active = 1;
+    ov.title = title;
+    ov.query = "";                                      // nothing is being typed into this one
+    ov.items = lines;
+    ov.nitems = nlines;
+    ov.selected = -1;                                   // no selection: this is text, not a menu
+
+    while (1) {
+        if (resize_pending) {
+            resize_pending = 0;
+            update_window_size();
+        }
+
+        int height = nlines < LIST_MAX_HEIGHT ? nlines : LIST_MAX_HEIGHT;
+        if (height > E.screenrows - 1) height = E.screenrows - 1;
+        if (height < 1) height = 1;
+
+        if (top > nlines - height) top = nlines - height;
+        if (top < 0) top = 0;
+
+        ov.top = top;
+        ov.height = height;
+
+        render_set_overlay(&ov);
+        editor_refresh_screen();
+
+        int c = editor_read_key();
+        if (c == -1) continue;
+
+        if (c == ARROW_DOWN || c == WHEEL_DOWN) { top++; continue; }
+        if (c == ARROW_UP || c == WHEEL_UP)     { top--; continue; }
+        if (c == PAGE_DOWN) { top += height; continue; }
+        if (c == PAGE_UP)   { top -= height; continue; }
+
+        break;                                          // any other key dismisses it
+    }
+
+    render_set_overlay(NULL);
 }
 
 void list_free(void) {

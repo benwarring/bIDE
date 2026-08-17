@@ -9,3 +9,9 @@ obj/
 
 # executables
 bin/
+# clangd compilation database (generated: make compdb)
+compile_commands.json
+.cache/
+
+# LSP message log
+lsp.log

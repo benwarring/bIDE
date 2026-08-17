@@ -76,6 +76,27 @@ int buffer_line_rlength(int idx);
  */
 int buffer_get_line(int idx, char *dst, size_t dstsize);
 
+/* ------------------------------------------------------------------------
+ * The same reads, against a named buffer rather than the active one.
+ *
+ * The language server talks about documents that are not necessarily the one
+ * on screen — a diagnostic arrives for whichever file it concerns, and a
+ * didChange has to serialize a buffer the user has already switched away from.
+ * These keep that code out of the row array just as the active-buffer versions
+ * do.
+ * ------------------------------------------------------------------------ */
+
+int buffer_num_lines_of(const Buffer *b);
+
+int buffer_get_line_of(const Buffer *b, int idx, char *dst, size_t dstsize);
+
+/**
+ * The whole buffer as one NUL-terminated string with '\n' terminators, which is
+ * the form the protocol wants regardless of the file's own line endings. Caller
+ * frees. `len` receives the byte length.
+ */
+char *buffer_text_of(const Buffer *b, size_t *len);
+
 /**
  * Same, but the tab-expanded render string. This is what the renderer draws.
  */
