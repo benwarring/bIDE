@@ -212,16 +212,6 @@ void editor_scroll(void) {
     }
 }
 
-static void draw_welcome(abuf *ab) {
-    char welcome[80];
-    int len = snprintf(welcome, sizeof(welcome), "bIDE editor -- version %s", BIDE_VERSION);
-    if (len > text_cols()) len = text_cols();
-
-    int padding = (text_cols() - len) / 2;
-    while (padding--) ab_appendstr(ab, " ");
-    ab_append(ab, welcome, (size_t)len);
-}
-
 /**
  * Right-aligned line number, then " | " to hold the text clear of the numbers.
  * Dimmed so it recedes, with the cursor's own line left undimmed. The separator
@@ -362,9 +352,8 @@ static void draw_rows(abuf *ab) {
             draw_gutter(ab, -1);
             if (editor_buffer()->filename == NULL && buffer_num_lines() <= 1 &&
                 y == E.screenrows / 3) {
-                draw_welcome(ab);
             } else {
-                ab_appendstr(ab, "~");
+                ab_appendstr(ab, "");
             }
         } else {
             draw_gutter(ab, filerow);
