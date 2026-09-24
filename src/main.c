@@ -126,7 +126,7 @@ int main(int argc, char *argv[]) {
     lsp_init();
 
     buffer_open(argc >= 2 ? argv[1] : NULL);
-    if (command_load_keymap() == 0) command_show_help(); // a config error outranks the hint
+    command_load_keymap();
 
     run();
     cleanup();

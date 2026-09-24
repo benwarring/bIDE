@@ -7,6 +7,7 @@
 
 #include "render.h"
 #include "buffer.h"
+#include "command.h"
 #include "editor.h"
 #include "lsp.h"
 #include "syntax.h"
@@ -441,29 +442,49 @@ static void draw_status_bar(abuf *ab) {
 static void draw_message_bar(abuf *ab) {
     ab_appendstr(ab, "\x1b[K");
 
-    int msglen = (int)strlen(E.statusmsg);
-    if (msglen > E.screencols) msglen = E.screencols;
-    if (msglen && time(NULL) - E.statusmsg_time < STATUSMSG_TIMEOUT) {
-        ab_append(ab, E.statusmsg, (size_t)msglen);
-        return;
+    const char *legend = command_legend();
+    int llen = (int)strlen(legend);
+
+    /* The right side is a fresh message, or with nothing else to say, the
+     * diagnostic under the cursor: the gutter marker says *that* something is
+     * wrong on a line, this says what. A message answers what you just did, so it
+     * may push the legend off; a diagnostic is always there, so it gets only the
+     * room the legend leaves. */
+    const char *right = NULL;
+    int color = 0;
+    if (E.statusmsg[0] && time(NULL) - E.statusmsg_time < STATUSMSG_TIMEOUT) {
+        right = E.statusmsg;
+    } else {
+        View *v = editor_view();
+        right = lsp_line_message(editor_buffer(), v->cy);
+        if (right) color = diag_color(lsp_line_severity(editor_buffer(), v->cy));
     }
+    int rlen = right ? (int)strlen(right) : 0;
 
-    /* With nothing else to say, the line shows the diagnostic under the cursor.
-     * The gutter marker says *that* something is wrong on a line; this says
-     * what, without needing a popup or a second keystroke. */
-    View *v = editor_view();
-    const char *diag = lsp_line_message(editor_buffer(), v->cy);
-    if (diag == NULL) return;
+    if (llen > E.screencols) llen = E.screencols;
+    int room = E.screencols - llen - 2;                 // two spaces keep them from running together
+    if (rlen > room) {
+        if (color) rlen = room > 0 ? room : 0;          // the diagnostic is cut short
+        else llen = 0;                                  // the legend steps aside, whole
+    }
+    if (rlen > E.screencols) rlen = E.screencols;
 
-    int severity = lsp_line_severity(editor_buffer(), v->cy);
-    char buf[16];
-    int n = snprintf(buf, sizeof(buf), "\x1b[%dm", diag_color(severity));
-    ab_append(ab, buf, (size_t)n);
+    if (llen) {
+        ab_appendstr(ab, "\x1b[2m");                    // dim, so a message stands out beside it
+        ab_append(ab, legend, (size_t)llen);
+        ab_appendstr(ab, "\x1b[22m");
+    }
+    if (rlen == 0) return;
 
-    int len = (int)strlen(diag);
-    if (len > E.screencols) len = E.screencols;
-    ab_append(ab, diag, (size_t)len);
-    ab_appendstr(ab, "\x1b[39m");
+    for (int col = llen; col < E.screencols - rlen; col++) ab_appendstr(ab, " ");
+
+    if (color) {
+        char buf[16];
+        int n = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+        ab_append(ab, buf, (size_t)n);
+    }
+    ab_append(ab, right, (size_t)rlen);
+    if (color) ab_appendstr(ab, "\x1b[39m");
 }
 
 void editor_refresh_screen(void) {

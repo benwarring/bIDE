@@ -41,12 +41,13 @@ void command_reset_quit(void);
 /**
  * Builds the keymap from the defaults plus keys.conf. Must run before the first
  * dispatch; running it again reloads. A bad line is skipped and reported on the
- * status line. Returns how many lines were bad.
+ * status line.
  */
-int command_load_keymap(void);
+void command_load_keymap(void);
 
-/** The startup hint, naming whatever keys save, find, palette, keys and quit are on now. */
-void command_show_help(void);
+/** The key legend for the message line, naming whatever keys save, find, palette,
+ * keys and quit are on right now. Points at a static buffer. */
+const char *command_legend(void);
 
 void command_free(void);
 

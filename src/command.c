@@ -394,24 +394,24 @@ static int keys_path(char *out, size_t n) {
     return 1;
 }
 
-int command_load_keymap(void) {
+void command_load_keymap(void) {
     free(keymap);                                       // a reload starts over from the defaults
     keymap = Malloc(sizeof(BINDINGS));
     memcpy(keymap, BINDINGS, sizeof(BINDINGS));
     nkeymap = NBINDINGS;
 
     char path[1024];
-    if (!keys_path(path, sizeof(path))) return 0;
+    if (!keys_path(path, sizeof(path))) return;
 
     FILE *fp = fopen(path, "r");                        // no file is the normal case, not an error
-    if (fp == NULL) return 0;
+    if (fp == NULL) return;
 
     // the first mention of a command replaces its default keys; later lines add more
     char rebound[NCOMMANDS];
     memset(rebound, 0, sizeof(rebound));
 
     char line[256];
-    int lineno = 0, errors = 0;
+    int lineno = 0;
     while (fgets(line, sizeof(line), fp)) {
         lineno++;
         char *hash = strchr(line, '#');
@@ -425,7 +425,6 @@ int command_load_keymap(void) {
         int key = (got == 2) ? parse_key(name) : -1;
 
         // a bad line is skipped, not fatal; the last one is what stays on screen
-        if (got != 2 || c == NULL || key == -1 || is_locked(key)) errors++;
 
         if (got != 2) {
             editor_set_status_message("keys.conf:%d: expected '<command> <key>'", lineno);
@@ -449,7 +448,6 @@ int command_load_keymap(void) {
         }
     }
     fclose(fp);
-    return errors;
 }
 
 /** mkdir -p for everything above `path`. Failures surface when the file is opened. */
@@ -558,25 +556,27 @@ static void cmd_keys(void) {
     else editor_set_status_message("\"%s\" is now %s", c->name, label);
 }
 
-void command_show_help(void) {
-    static const char *const HELP[][2] = {
+/* Built from the live keymap every time, so it can never advertise a key that has
+ * since been rebound. A handful of lookups a frame is nothing. */
+const char *command_legend(void) {
+    static const char *const LEGEND[][2] = {
         {"file.save", "save"}, {"file.find", "find"}, {"editor.palette", "palette"},
         {"editor.keys", "keys"}, {"editor.quit", "quit"},
     };
 
-    char msg[128] = "HELP:";
-    size_t len = strlen(msg);
-    const char *sep = " ";
+    static char out[128];
+    size_t len = 0;
+    out[0] = '\0';
 
-    for (size_t i = 0; i < sizeof(HELP) / sizeof(HELP[0]) && len < sizeof(msg); i++) {
+    for (size_t i = 0; i < sizeof(LEGEND) / sizeof(LEGEND[0]) && len < sizeof(out); i++) {
         char key[24];
-        binding_label(HELP[i][0], key, sizeof(key));
+        binding_label(LEGEND[i][0], key, sizeof(key));
         if (key[0] == '\0') continue;                   // unbound: nothing to advertise
 
-        len += (size_t)snprintf(msg + len, sizeof(msg) - len, "%s%s %s", sep, key, HELP[i][1]);
-        sep = " | ";
+        len += (size_t)snprintf(out + len, sizeof(out) - len, "%s%s %s",
+                                len ? " | " : "", key, LEGEND[i][1]);
     }
-    editor_set_status_message("%s", msg);
+    return out;
 }
 
 void command_free(void) {
