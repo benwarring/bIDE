@@ -128,6 +128,7 @@ int main(int argc, char *argv[]) {
     buffer_open(argc >= 2 ? argv[1] : NULL);
     editor_set_status_message(
         "HELP: Ctrl-S save | Ctrl-F find | Ctrl-K palette | Ctrl-X quit");
+    command_load_keymap();                              // after the help, so a config error replaces it
 
     run();
     cleanup();

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "command.h"
 #include "buffer.h"
@@ -19,13 +20,17 @@
 static int quit_requested = 0;
 static int quit_times = QUIT_TIMES;
 
+static void binding_label(const char *id, char *out, size_t n);
+
 /* ------------------------------------------------------------- commands --- */
 
 static void cmd_quit(void) {
     if (undo_any_dirty() && quit_times > 0) {
+        char key[24];
+        binding_label("editor.quit", key, sizeof(key));
         editor_set_status_message(
-            "WARNING! Unsaved changes. Press Ctrl-X %d more time%s to quit.",
-            quit_times, quit_times == 1 ? "" : "s");
+            "WARNING! Unsaved changes. Press %s %d more time%s to quit.",
+            key, quit_times, quit_times == 1 ? "" : "s");
         quit_times--;
         return;
     }
@@ -97,6 +102,8 @@ static void cmd_palette(void);
 static const Command COMMANDS[] = {
     {"cursor.left",       "Move left",                  editor_move_left,       NULL},
     {"cursor.right",      "Move right",                 editor_move_right,      NULL},
+    {"cursor.wordleft",   "Move word left",             editor_word_left,       NULL},
+    {"cursor.wordright",  "Move word right",            editor_word_right,      NULL},
     {"cursor.up",         "Move up",                    editor_move_up,         NULL},
     {"cursor.down",       "Move down",                  editor_move_down,       NULL},
     {"cursor.pageup",     "Page up",                    editor_page_up,         NULL},
@@ -149,11 +156,13 @@ typedef struct {
     const char *id;
 } Binding;
 
-/* Rebinding is editing this table. The Ctrl choices avoid the ones VS Code's
- * integrated terminal tends to intercept. */
+/* The defaults. keys.conf rebinds on top of a copy of this table. The Ctrl
+ * choices avoid the ones VS Code's integrated terminal tends to intercept. */
 static const Binding BINDINGS[] = {
     {ARROW_LEFT,        "cursor.left"},
     {ARROW_RIGHT,       "cursor.right"},
+    {CTRL_ARROW_LEFT,   "cursor.wordleft"},
+    {CTRL_ARROW_RIGHT,  "cursor.wordright"},
     {ARROW_UP,          "cursor.up"},
     {ARROW_DOWN,        "cursor.down"},
     {PAGE_UP,           "cursor.pageup"},
@@ -199,6 +208,25 @@ static const Binding BINDINGS[] = {
 
 #define NBINDINGS (int)(sizeof(BINDINGS) / sizeof(BINDINGS[0]))
 
+/* Keys the config file can neither take away nor hand out: movement and the
+ * editing keys every editor agrees on. Tab, Enter and Esc are here because
+ * Ctrl-I, Ctrl-M and Ctrl-[ are the same bytes, and Ctrl-H is Backspace. */
+static const int LOCKED_KEYS[] = {
+    ARROW_LEFT, ARROW_RIGHT, ARROW_UP, ARROW_DOWN,
+    CTRL_ARROW_LEFT, CTRL_ARROW_RIGHT,
+    HOME_KEY, END_KEY, PAGE_UP, PAGE_DOWN,
+    MOUSE_CLICK, WHEEL_UP, WHEEL_DOWN,
+    '\r', '\t', '\x1b', BACKSPACE, CTRL_KEY('h'), DEL_KEY,
+    CTRL_KEY('z'), CTRL_KEY('y'),                       // undo, redo
+    CTRL_KEY('c'), CTRL_KEY('v'),                       // reserved for copy and paste
+};
+
+#define NLOCKED (int)(sizeof(LOCKED_KEYS) / sizeof(LOCKED_KEYS[0]))
+
+// the live keymap: BINDINGS plus whatever keys.conf changed
+static Binding *keymap = NULL;
+static int nkeymap = 0;
+
 /* ------------------------------------------------------------- lookups --- */
 
 static const Command *find_command(const char *id) {
@@ -210,6 +238,7 @@ static const Command *find_command(const char *id) {
 
 static void key_label(int key, char *out, size_t n) {
     switch (key) {
+        case 0:               snprintf(out, n, "Ctrl-Space"); return;
         case '\r':            snprintf(out, n, "Enter");     return;
         case '\x1b':          snprintf(out, n, "Esc");       return;
         case BACKSPACE:       snprintf(out, n, "Backspace"); return;
@@ -220,6 +249,8 @@ static void key_label(int key, char *out, size_t n) {
         case ARROW_DOWN:      snprintf(out, n, "Down");      return;
         case CTRL_ARROW_UP:   snprintf(out, n, "Ctrl-Up");   return;
         case CTRL_ARROW_DOWN: snprintf(out, n, "Ctrl-Down"); return;
+        case CTRL_ARROW_LEFT: snprintf(out, n, "Ctrl-Left"); return;
+        case CTRL_ARROW_RIGHT: snprintf(out, n, "Ctrl-Right"); return;
         case PAGE_UP:         snprintf(out, n, "PgUp");      return;
         case PAGE_DOWN:       snprintf(out, n, "PgDn");      return;
         case HOME_KEY:        snprintf(out, n, "Home");      return;
@@ -236,9 +267,9 @@ static void key_label(int key, char *out, size_t n) {
 
 /** First key bound to a command, for display in the palette. */
 static void binding_label(const char *id, char *out, size_t n) {
-    for (int i = 0; i < NBINDINGS; i++) {
-        if (strcmp(BINDINGS[i].id, id) == 0) {
-            key_label(BINDINGS[i].key, out, n);
+    for (int i = 0; i < nkeymap; i++) {
+        if (strcmp(keymap[i].id, id) == 0) {
+            key_label(keymap[i].key, out, n);
             return;
         }
     }
@@ -295,10 +326,10 @@ int command_quit_requested(void) {
 }
 
 int command_dispatch(int key) {
-    for (int i = 0; i < NBINDINGS; i++) {
-        if (BINDINGS[i].key != key) continue;
+    for (int i = 0; i < nkeymap; i++) {
+        if (keymap[i].key != key) continue;
 
-        const Command *c = find_command(BINDINGS[i].id);
+        const Command *c = find_command(keymap[i].id);
         if (c == NULL) return 0;
         if (c->avail && !c->avail()) return 1;          // bound but not applicable: swallow it
 
@@ -311,7 +342,103 @@ int command_dispatch(int key) {
     return 0;
 }
 
+/* ------------------------------------------------------------- keymap --- */
+
+/**
+ * Parsing a key name is key_label run backwards: try every key there is and
+ * keep the one whose label matches. The palette and the config file can then
+ * never disagree about what a key is called.
+ */
+static int parse_key(const char *name) {
+    char label[24];
+    for (int k = 0; k <= WHEEL_DOWN; k++) {
+        if (k > BACKSPACE && k < ARROW_LEFT) continue;
+        key_label(k, label, sizeof(label));
+        if (strcasecmp(label, name) == 0) return k;
+    }
+    return -1;
+}
+
+static int is_locked(int key) {
+    for (int i = 0; i < NLOCKED; i++) {
+        if (LOCKED_KEYS[i] == key) return 1;
+    }
+    return 0;
+}
+
+/** Drops unlocked bindings: every one for command `id`, or if `id` is NULL, the one on `key`. */
+static void unbind(int key, const char *id) {
+    int out = 0;
+    for (int i = 0; i < nkeymap; i++) {
+        int drop = !is_locked(keymap[i].key) &&
+                   (id ? strcmp(keymap[i].id, id) == 0 : keymap[i].key == key);
+        if (!drop) keymap[out++] = keymap[i];
+    }
+    nkeymap = out;
+}
+
+void command_load_keymap(void) {
+    keymap = Malloc(sizeof(BINDINGS));
+    memcpy(keymap, BINDINGS, sizeof(BINDINGS));
+    nkeymap = NBINDINGS;
+
+    char path[1024];
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && *xdg) snprintf(path, sizeof(path), "%s/bide/keys.conf", xdg);
+    else if (home) snprintf(path, sizeof(path), "%s/.config/bide/keys.conf", home);
+    else return;
+
+    FILE *fp = fopen(path, "r");                        // no file is the normal case, not an error
+    if (fp == NULL) return;
+
+    // the first mention of a command replaces its default keys; later lines add more
+    char rebound[NCOMMANDS];
+    memset(rebound, 0, sizeof(rebound));
+
+    char line[256];
+    int lineno = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        lineno++;
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';
+
+        char id[64], name[64], extra;
+        int got = sscanf(line, "%63s %63s %c", id, name, &extra);
+        if (got <= 0) continue;                         // blank or comment
+
+        const Command *c = find_command(id);
+        int key = (got == 2) ? parse_key(name) : -1;
+
+        // a bad line is skipped, not fatal; the last one is what stays on screen
+        if (got != 2) {
+            editor_set_status_message("keys.conf:%d: expected '<command> <key>'", lineno);
+        } else if (c == NULL) {
+            editor_set_status_message("keys.conf:%d: no command '%s'", lineno, id);
+        } else if (key == -1) {
+            editor_set_status_message("keys.conf:%d: unknown key '%s'", lineno, name);
+        } else if (is_locked(key)) {
+            editor_set_status_message("keys.conf:%d: %s can't be rebound", lineno, name);
+        } else {
+            if (!rebound[c - COMMANDS]) {
+                rebound[c - COMMANDS] = 1;
+                unbind(0, c->id);
+            }
+            unbind(key, NULL);                          // the key now belongs to this command alone
+
+            keymap = Realloc(keymap, sizeof(Binding) * (size_t)(nkeymap + 1));
+            keymap[nkeymap].key = key;
+            keymap[nkeymap].id = c->id;                 // the table's string, which never goes away
+            nkeymap++;
+        }
+    }
+    fclose(fp);
+}
+
 void command_free(void) {
+    free(keymap);
+    keymap = NULL;
+    nkeymap = 0;
     list_free();
     files_free();
 }

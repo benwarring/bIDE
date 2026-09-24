@@ -88,9 +88,26 @@ its binding, which is the authoritative version of this table.
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close buffer | <kbd>Ctrl</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd> | Add cursor above / below |
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Command palette | <kbd>Esc</kbd> | Collapse to one cursor |
 | <kbd>Ctrl</kbd>+<kbd>X</kbd> | Quit | <kbd>Ctrl</kbd>+<kbd>R</kbd> | Rescan files |
+| <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Word left / right | | |
 
-Rebinding is editing the `BINDINGS` table in [`src/command.c`](src/command.c).
-There is no config file, by design.
+### Rebinding
+
+Put overrides in `~/.config/bide/keys.conf` (or `$XDG_CONFIG_HOME/bide/keys.conf`),
+one `<command> <key>` per line. Command ids and key names are exactly what the
+palette's command table in [`src/command.c`](src/command.c) and its key column use.
+
+```
+# command        key
+file.save        Ctrl-G
+lsp.definition   Ctrl-S     # a key moves: Ctrl-S no longer saves
+buffer.next      Ctrl-Down  # a second line for the same command adds a key
+buffer.next      Ctrl-J
+```
+
+The first line for a command replaces its default keys. Movement, Enter, Tab,
+Backspace, Del, Esc, <kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, undo/redo
+(<kbd>Ctrl</kbd>+<kbd>Z</kbd>/<kbd>Y</kbd>) and <kbd>Ctrl</kbd>+<kbd>C</kbd>/<kbd>V</kbd>
+are fixed. A bad line is skipped and reported on the status line.
 
 ## Layout
 

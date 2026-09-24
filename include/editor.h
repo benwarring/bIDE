@@ -105,6 +105,8 @@ enum editorKey {
     ARROW_DOWN,
     CTRL_ARROW_UP,
     CTRL_ARROW_DOWN,
+    CTRL_ARROW_LEFT,
+    CTRL_ARROW_RIGHT,
     DEL_KEY,
     HOME_KEY,
     END_KEY,

@@ -12,8 +12,8 @@
  * entry points — which is the only reason a palette is possible at all, since a
  * switch statement cannot be enumerated or invoked by name.
  *
- * Bindings are data now, not control flow: rebinding a key is a one-line edit to
- * a table rather than surgery on a switch.
+ * Bindings are data now, not control flow. The table in command.c holds the
+ * defaults; ~/.config/bide/keys.conf rebinds on top of them.
  */
 typedef void (*command_fn)(void);
 
@@ -37,6 +37,12 @@ int command_quit_requested(void);
 
 /** Any key that is not the quit key resets the quit confirmation countdown. */
 void command_reset_quit(void);
+
+/**
+ * Builds the keymap from the defaults plus keys.conf. Must run before the first
+ * dispatch. A bad line is skipped and reported on the status line.
+ */
+void command_load_keymap(void);
 
 void command_free(void);
 

@@ -61,7 +61,7 @@ static int read_mouse(void) {
 
 /**
  * "\x1b[1;<mod><final>" is a modified arrow. Modifier 5 is Ctrl, which is how a
- * terminal reports Ctrl-Up and Ctrl-Down.
+ * terminal reports Ctrl-Up, Ctrl-Down, Ctrl-Left and Ctrl-Right.
  */
 static int read_modified_arrow(void) {
     unsigned char mod, final;
@@ -71,6 +71,8 @@ static int read_modified_arrow(void) {
     if (mod == '5') {
         if (final == 'A') return CTRL_ARROW_UP;
         if (final == 'B') return CTRL_ARROW_DOWN;
+        if (final == 'C') return CTRL_ARROW_RIGHT;
+        if (final == 'D') return CTRL_ARROW_LEFT;
     }
 
     switch (final) {                                    // any other modifier: plain movement
@@ -267,6 +269,34 @@ static void op_right(bpos *p) {
     }
 }
 
+static int is_word_byte(int c) {
+    return c != -1 && (isalnum(c) || c == '_');
+}
+
+/* 0 whitespace, 1 word, 2 punctuation: a word jump skips whitespace, then one run
+ * of a single class, so "foo->bar" stops at the arrow instead of leaping it. */
+static int char_class(int c) {
+    if (c == -1 || isspace(c)) return 0;
+    return is_word_byte(c) ? 1 : 2;
+}
+
+static void op_word_left(bpos *p) {
+    if (p->cx == 0) { op_left(p); return; }             // start of line: wrap to previous
+    while (p->cx > 0 && char_class(buffer_char_at(p->cy, p->cx - 1)) == 0) p->cx--;
+    if (p->cx == 0) return;
+    int cls = char_class(buffer_char_at(p->cy, p->cx - 1));
+    while (p->cx > 0 && char_class(buffer_char_at(p->cy, p->cx - 1)) == cls) p->cx--;
+}
+
+static void op_word_right(bpos *p) {
+    int len = buffer_line_length(p->cy);
+    if (p->cx >= len) { op_right(p); return; }          // end of line: wrap to next
+    while (p->cx < len && char_class(buffer_char_at(p->cy, p->cx)) == 0) p->cx++;
+    if (p->cx == len) return;
+    int cls = char_class(buffer_char_at(p->cy, p->cx));
+    while (p->cx < len && char_class(buffer_char_at(p->cy, p->cx)) == cls) p->cx++;
+}
+
 static void op_up(bpos *p)    { if (p->cy > 0) p->cy--; clamp_pos(p); }
 static void op_down(bpos *p)  { if (p->cy < buffer_num_lines() - 1) p->cy++; clamp_pos(p); }
 static void op_start(bpos *p) { p->cx = 0; }
@@ -293,6 +323,8 @@ static void multi_move(void (*op)(bpos *)) {
 void editor_move_left(void)  { multi_move(op_left); }
 void editor_move_right(void) { multi_move(op_right); }
 void editor_move_up(void)    { multi_move(op_up); }
+void editor_word_left(void)  { multi_move(op_word_left); }
+void editor_word_right(void) { multi_move(op_word_right); }
 void editor_move_down(void)  { multi_move(op_down); }
 void editor_line_start(void) { multi_move(op_start); }
 void editor_line_end(void)   { multi_move(op_end); }
@@ -344,10 +376,6 @@ static const char PAIR_CLOSE[] = ")]}\"'";
 static char closing_for(int c) {
     const char *p = strchr(PAIR_OPEN, c);
     return (p && *p) ? PAIR_CLOSE[p - PAIR_OPEN] : 0;
-}
-
-static int is_word_byte(int c) {
-    return c != -1 && (isalnum(c) || c == '_');
 }
 
 /**

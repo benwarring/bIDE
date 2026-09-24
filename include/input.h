@@ -36,6 +36,8 @@ void editor_move_left(void);
 void editor_move_right(void);
 void editor_move_up(void);
 void editor_move_down(void);
+void editor_word_left(void);
+void editor_word_right(void);
 void editor_page_up(void);
 void editor_page_down(void);
 void editor_line_start(void);
