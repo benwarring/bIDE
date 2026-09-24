@@ -40,9 +40,13 @@ void command_reset_quit(void);
 
 /**
  * Builds the keymap from the defaults plus keys.conf. Must run before the first
- * dispatch. A bad line is skipped and reported on the status line.
+ * dispatch; running it again reloads. A bad line is skipped and reported on the
+ * status line. Returns how many lines were bad.
  */
-void command_load_keymap(void);
+int command_load_keymap(void);
+
+/** The startup hint, naming whatever keys save, find, palette, keys and quit are on now. */
+void command_show_help(void);
 
 void command_free(void);
 

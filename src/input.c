@@ -60,30 +60,70 @@ static int read_mouse(void) {
 }
 
 /**
- * "\x1b[1;<mod><final>" is a modified arrow. Modifier 5 is Ctrl, which is how a
- * terminal reports Ctrl-Up, Ctrl-Down, Ctrl-Left and Ctrl-Right.
+ * A key the terminal reported as a codepoint plus modifiers, back in the terms
+ * the rest of the editor uses. Modifier values are 1 + a bitmask: 1 Shift,
+ * 2 Alt, 4 Ctrl. Ctrl-letter comes back as its old control byte, so turning the
+ * extended reporting on changes nothing downstream.
  */
-static int read_modified_arrow(void) {
-    unsigned char mod, final;
-    if (Read(STDIN_FILENO, &mod, 1) != 1) return '\x1b';
-    if (Read(STDIN_FILENO, &final, 1) != 1) return '\x1b';
+static int modified_key(int code, int mod) {
+    int bits = mod - 1;
 
-    if (mod == '5') {
-        if (final == 'A') return CTRL_ARROW_UP;
-        if (final == 'B') return CTRL_ARROW_DOWN;
-        if (final == 'C') return CTRL_ARROW_RIGHT;
-        if (final == 'D') return CTRL_ARROW_LEFT;
+    switch (code) {                                     // kitty sends these as CSI u too
+        case 27:  return '\x1b';
+        case 13:  return '\r';
+        case 9:   return '\t';
+        case 127: return BACKSPACE;
     }
+    if (!(bits & 4)) return -1;                         // Alt combinations: nothing uses them
 
-    switch (final) {                                    // any other modifier: plain movement
-        case 'A': return ARROW_UP;
-        case 'B': return ARROW_DOWN;
-        case 'C': return ARROW_RIGHT;
-        case 'D': return ARROW_LEFT;
+    if (code == ' ') return 0;                          // Ctrl-Space, as NUL like before
+    if (code >= 'A' && code <= 'Z') code += 'a' - 'A';  // modifyOtherKeys reports the shifted letter
+    if (code < 'a' || code > 'z') return -1;
+    return (bits & 1) ? CTRL_SHIFT_KEY(code) : CTRL_KEY(code);
+}
+
+/**
+ * "\x1b[<params><final>" with numeric parameters: the ~ keys ("5~"), modified
+ * arrows ("1;5C"), and modified keys in either extended form, xterm's
+ * "27;<mod>;<code>~" or kitty's "<code>;<mod>u".
+ */
+static int read_csi(unsigned char first) {
+    char buf[32];
+    unsigned int i = 0;
+    buf[i++] = (char)first;
+
+    unsigned char final;
+    while (1) {
+        if (Read(STDIN_FILENO, &final, 1) != 1) return '\x1b';
+        if (final >= 0x40 && final <= 0x7E) break;      // the final byte ends every CSI sequence
+        if (i < sizeof(buf) - 1) buf[i++] = (char)final;
+    }
+    buf[i] = '\0';
+
+    int p0 = 0, mod = 1, p2 = 0;                        // no modifier parameter means none
+    int np = sscanf(buf, "%d;%d;%d", &p0, &mod, &p2);
+    int ctrl = (mod - 1) & 4;
+
+    switch (final) {
+        case 'u': return modified_key(p0, mod);
+        case '~':
+            if (np == 3 && p0 == 27) return modified_key(p2, mod);
+            switch (p0) {
+                case 1: case 7: return HOME_KEY;
+                case 3:         return DEL_KEY;
+                case 4: case 8: return END_KEY;
+                case 5:         return PAGE_UP;
+                case 6:         return PAGE_DOWN;
+            }
+            return -1;
+        case 'A': return ctrl ? CTRL_ARROW_UP : ARROW_UP;
+        case 'B': return ctrl ? CTRL_ARROW_DOWN : ARROW_DOWN;
+        case 'C': return ctrl ? CTRL_ARROW_RIGHT : ARROW_RIGHT;
+        case 'D': return ctrl ? CTRL_ARROW_LEFT : ARROW_LEFT;
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
     }
-    return '\x1b';
+    return -1;                                          // something we don't use; ignore it whole
 }
 
 int editor_read_key(void) {
@@ -94,7 +134,7 @@ int editor_read_key(void) {
 
     // an escape byte with nothing behind it is a real Escape keypress;
     // the VTIME timeout is what makes that distinguishable from a sequence
-    unsigned char seq[3];
+    unsigned char seq[2];
     if (Read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
     if (Read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
 
@@ -102,20 +142,7 @@ int editor_read_key(void) {
         if (seq[1] == '<') return read_mouse();
 
         if (seq[1] >= '0' && seq[1] <= '9') {
-            if (Read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
-            if (seq[2] == ';') return read_modified_arrow();
-
-            if (seq[2] == '~') {
-                switch (seq[1]) {
-                    case '1': return HOME_KEY;
-                    case '3': return DEL_KEY;
-                    case '4': return END_KEY;
-                    case '5': return PAGE_UP;
-                    case '6': return PAGE_DOWN;
-                    case '7': return HOME_KEY;
-                    case '8': return END_KEY;
-                }
-            }
+            return read_csi(seq[1]);
         } else {
             switch (seq[1]) {
                 case 'A': return ARROW_UP;

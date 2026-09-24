@@ -88,11 +88,20 @@ its binding, which is the authoritative version of this table.
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close buffer | <kbd>Ctrl</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd> | Add cursor above / below |
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Command palette | <kbd>Esc</kbd> | Collapse to one cursor |
 | <kbd>Ctrl</kbd>+<kbd>X</kbd> | Quit | <kbd>Ctrl</kbd>+<kbd>R</kbd> | Rescan files |
-| <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Word left / right | | |
+| <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Word left / right | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd> | Configure keybindings… |
 
 ### Rebinding
 
-Put overrides in `~/.config/bide/keys.conf` (or `$XDG_CONFIG_HOME/bide/keys.conf`),
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd> (or *Configure keybindings…* in the
+palette) lists every command; pick one and press its new key, or Backspace to
+put it back to its default. The change is written to `keys.conf` straight away.
+
+Most terminals send the same byte for <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd>
+as for <kbd>Ctrl</kbd>+<kbd>K</kbd>. bide asks for the kitty keyboard protocol and
+xterm's modifyOtherKeys, which tell them apart; where the terminal supports
+neither, the key opens the palette instead, and the entry is right there.
+
+Or edit the file by hand: put overrides in `~/.config/bide/keys.conf` (or `$XDG_CONFIG_HOME/bide/keys.conf`),
 one `<command> <key>` per line. Command ids and key names are exactly what the
 palette's command table in [`src/command.c`](src/command.c) and its key column use.
 

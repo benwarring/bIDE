@@ -30,6 +30,13 @@ volatile sig_atomic_t resize_pending = 0;
 #define SCREEN_ON  "\x1b[?1049h"
 #define SCREEN_OFF "\x1b[?1049l"
 
+/* Ask for modified keys as escape sequences, so Ctrl-Shift-K is not just Ctrl-K.
+ * ">1u" pushes the kitty keyboard protocol's disambiguate mode, "<u" pops it;
+ * ">4;1m" is xterm's modifyOtherKeys. A terminal that knows neither ignores
+ * both and keeps sending plain control bytes. */
+#define KEYS_ON  "\x1b[>1u\x1b[>4;1m"
+#define KEYS_OFF "\x1b[>4m\x1b[<u"
+
 /* Set once the original settings have actually been captured, so a die() during
  * startup does not restore a struct that was never filled in, and cleared once
  * they are back so the atexit handler is a no-op after die() has already run. */
@@ -41,7 +48,8 @@ static void restore_terminal(void) {
     if (!termios_saved) return;
     termios_saved = 0;
 
-    ssize_t n = write(STDOUT_FILENO, MOUSE_OFF SCREEN_OFF, sizeof(MOUSE_OFF SCREEN_OFF) - 1);
+    ssize_t n = write(STDOUT_FILENO, KEYS_OFF MOUSE_OFF SCREEN_OFF,
+                      sizeof(KEYS_OFF MOUSE_OFF SCREEN_OFF) - 1);
     (void)n;                                            // failing here changes nothing we can act on
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);  // restore original terminal settings
 }
@@ -78,7 +86,7 @@ void enable_raw_mode(void) {
     raw.c_cc[VTIME] = 1;
     Tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
-    Write(STDOUT_FILENO, SCREEN_ON MOUSE_ON, sizeof(SCREEN_ON MOUSE_ON) - 1);
+    Write(STDOUT_FILENO, SCREEN_ON MOUSE_ON KEYS_ON, sizeof(SCREEN_ON MOUSE_ON KEYS_ON) - 1);
 }
 
 /**

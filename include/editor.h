@@ -86,7 +86,7 @@ typedef struct {
     int nviews;
     int active;
 
-    char statusmsg[80];
+    char statusmsg[128];
     time_t statusmsg_time;
 } EditorConfig;
 
@@ -114,7 +114,12 @@ enum editorKey {
     PAGE_DOWN,
     MOUSE_CLICK,
     WHEEL_UP,
-    WHEEL_DOWN
+    WHEEL_DOWN,
+    CTRL_SHIFT_A                // through CTRL_SHIFT_A + 25; keep this last
 };
+
+/* Ctrl-Shift-letter has no byte of its own; it only exists when the terminal
+ * reports it as an escape sequence (see editor_read_key). */
+#define CTRL_SHIFT_KEY(k) (CTRL_SHIFT_A + (((k) & 0x1F) - 1))
 
 #endif

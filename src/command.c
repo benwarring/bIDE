@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "command.h"
 #include "buffer.h"
@@ -96,6 +98,7 @@ static void cmd_file_refresh(void) {
 }
 
 static void cmd_palette(void);
+static void cmd_keys(void);
 
 /* -------------------------------------------------------------- tables --- */
 
@@ -146,6 +149,7 @@ static const Command COMMANDS[] = {
     {"lsp.restart",       "Restart language server",    lsp_restart,            NULL},
 
     {"editor.palette",    "Command palette...",         cmd_palette,            NULL},
+    {"editor.keys",       "Configure keybindings...",   cmd_keys,               NULL},
     {"editor.quit",       "Quit",                       cmd_quit,               NULL},
 };
 
@@ -203,6 +207,7 @@ static const Binding BINDINGS[] = {
     {CTRL_KEY('a'),     "lsp.diag.prev"},
 
     {CTRL_KEY('k'),     "editor.palette"},
+    {CTRL_SHIFT_KEY('k'), "editor.keys"},               // only in terminals that can tell it from Ctrl-K
     {CTRL_KEY('x'),     "editor.quit"},
 };
 
@@ -262,6 +267,8 @@ static void key_label(int key, char *out, size_t n) {
     }
 
     if (key >= 1 && key <= 26) snprintf(out, n, "Ctrl-%c", 'A' + key - 1);
+    else if (key >= CTRL_SHIFT_A && key < CTRL_SHIFT_A + 26)
+        snprintf(out, n, "Ctrl-Shift-%c", 'A' + key - CTRL_SHIFT_A);
     else snprintf(out, n, " ");
 }
 
@@ -351,7 +358,7 @@ int command_dispatch(int key) {
  */
 static int parse_key(const char *name) {
     char label[24];
-    for (int k = 0; k <= WHEEL_DOWN; k++) {
+    for (int k = 0; k < CTRL_SHIFT_A + 26; k++) {
         if (k > BACKSPACE && k < ARROW_LEFT) continue;
         key_label(k, label, sizeof(label));
         if (strcasecmp(label, name) == 0) return k;
@@ -377,27 +384,34 @@ static void unbind(int key, const char *id) {
     nkeymap = out;
 }
 
-void command_load_keymap(void) {
+/** Where keys.conf lives. Returns 0 if there is nowhere to put it. */
+static int keys_path(char *out, size_t n) {
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && *xdg) snprintf(out, n, "%s/bide/keys.conf", xdg);
+    else if (home) snprintf(out, n, "%s/.config/bide/keys.conf", home);
+    else return 0;
+    return 1;
+}
+
+int command_load_keymap(void) {
+    free(keymap);                                       // a reload starts over from the defaults
     keymap = Malloc(sizeof(BINDINGS));
     memcpy(keymap, BINDINGS, sizeof(BINDINGS));
     nkeymap = NBINDINGS;
 
     char path[1024];
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    const char *home = getenv("HOME");
-    if (xdg && *xdg) snprintf(path, sizeof(path), "%s/bide/keys.conf", xdg);
-    else if (home) snprintf(path, sizeof(path), "%s/.config/bide/keys.conf", home);
-    else return;
+    if (!keys_path(path, sizeof(path))) return 0;
 
     FILE *fp = fopen(path, "r");                        // no file is the normal case, not an error
-    if (fp == NULL) return;
+    if (fp == NULL) return 0;
 
     // the first mention of a command replaces its default keys; later lines add more
     char rebound[NCOMMANDS];
     memset(rebound, 0, sizeof(rebound));
 
     char line[256];
-    int lineno = 0;
+    int lineno = 0, errors = 0;
     while (fgets(line, sizeof(line), fp)) {
         lineno++;
         char *hash = strchr(line, '#');
@@ -411,6 +425,8 @@ void command_load_keymap(void) {
         int key = (got == 2) ? parse_key(name) : -1;
 
         // a bad line is skipped, not fatal; the last one is what stays on screen
+        if (got != 2 || c == NULL || key == -1 || is_locked(key)) errors++;
+
         if (got != 2) {
             editor_set_status_message("keys.conf:%d: expected '<command> <key>'", lineno);
         } else if (c == NULL) {
@@ -433,6 +449,134 @@ void command_load_keymap(void) {
         }
     }
     fclose(fp);
+    return errors;
+}
+
+/** mkdir -p for everything above `path`. Failures surface when the file is opened. */
+static void make_parents(const char *path) {
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", path);
+    for (char *s = dir + 1; *s; s++) {
+        if (*s != '/') continue;
+        *s = '\0';
+        mkdir(dir, 0755);                               // EEXIST is the usual answer
+        *s = '/';
+    }
+}
+
+/**
+ * Rewrites keys.conf with `id` bound to `label` (or back to its defaults if
+ * `label` is NULL). Every line for `id`, and every line giving `key` to someone
+ * else, is dropped; everything else, comments included, is kept as written. Goes
+ * through a temporary file so a failed write cannot eat the old config.
+ */
+static int write_binding(const char *path, const char *id, int key, const char *label) {
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+    make_parents(path);
+    FILE *out = fopen(tmp, "w");
+    if (out == NULL) return 0;
+    FILE *in = fopen(path, "r");                        // absent the first time
+
+    char line[256];
+    while (in && fgets(line, sizeof(line), in)) {
+        char copy[256], lid[64], lname[64];
+        memcpy(copy, line, sizeof(line));
+        char *hash = strchr(copy, '#');
+        if (hash) *hash = '\0';
+
+        if (sscanf(copy, "%63s %63s", lid, lname) == 2 &&
+            (strcmp(lid, id) == 0 || (label && parse_key(lname) == key))) continue;
+        fputs(line, out);
+    }
+    if (label) fprintf(out, "%-16s %s\n", id, label);
+
+    int ok = !ferror(out);
+    if (in) fclose(in);
+    if (fclose(out) != 0) ok = 0;
+    if (ok && rename(tmp, path) == 0) return 1;
+
+    remove(tmp);
+    return 0;
+}
+
+/**
+ * Rebinding from inside the editor edits keys.conf and reloads it, rather than
+ * patching the live table, so what you set is exactly what the next start sees.
+ */
+static void cmd_keys(void) {
+    char path[1024];
+    if (!keys_path(path, sizeof(path))) {
+        editor_set_status_message("No HOME or XDG_CONFIG_HOME: nowhere to save keys.conf");
+        return;
+    }
+
+    char **items = Malloc(sizeof(char *) * (size_t)NCOMMANDS);
+    for (int i = 0; i < NCOMMANDS; i++) {
+        char key[24];
+        binding_label(COMMANDS[i].id, key, sizeof(key));
+
+        char line[256];
+        snprintf(line, sizeof(line), "%-28s %s", COMMANDS[i].name, key);
+        items[i] = strdup(line);
+    }
+
+    int pick = list_select("Rebind", items, NCOMMANDS);
+    for (int i = 0; i < NCOMMANDS; i++) free(items[i]);
+    free(items);
+    if (pick < 0) return;
+
+    const Command *c = &COMMANDS[pick];
+    editor_set_status_message("Press a key for \"%s\"  (Backspace: default, Esc: cancel)", c->name);
+
+    int key;
+    do {
+        editor_refresh_screen();
+        key = editor_read_key();
+    } while (key == -1);                                // read timeout, not a keypress
+
+    char label[24];
+    key_label(key, label, sizeof(label));
+    int reset = (key == BACKSPACE || key == CTRL_KEY('h'));
+
+    if (key == '\x1b') {
+        editor_set_status_message("Rebind cancelled");
+        return;
+    }
+    if (!reset && (is_locked(key) || label[0] == ' ')) { // a locked key, or plain text
+        editor_set_status_message("%s can't be rebound", label[0] == ' ' ? "That key" : label);
+        return;
+    }
+    if (!write_binding(path, c->id, key, reset ? NULL : label)) {
+        editor_set_status_message("Can't write %s: %s", path, strerror(errno));
+        return;
+    }
+
+    command_load_keymap();
+    if (reset) editor_set_status_message("\"%s\" is back to its default", c->name);
+    else editor_set_status_message("\"%s\" is now %s", c->name, label);
+}
+
+void command_show_help(void) {
+    static const char *const HELP[][2] = {
+        {"file.save", "save"}, {"file.find", "find"}, {"editor.palette", "palette"},
+        {"editor.keys", "keys"}, {"editor.quit", "quit"},
+    };
+
+    char msg[128] = "HELP:";
+    size_t len = strlen(msg);
+    const char *sep = " ";
+
+    for (size_t i = 0; i < sizeof(HELP) / sizeof(HELP[0]) && len < sizeof(msg); i++) {
+        char key[24];
+        binding_label(HELP[i][0], key, sizeof(key));
+        if (key[0] == '\0') continue;                   // unbound: nothing to advertise
+
+        len += (size_t)snprintf(msg + len, sizeof(msg) - len, "%s%s %s", sep, key, HELP[i][1]);
+        sep = " | ";
+    }
+    editor_set_status_message("%s", msg);
 }
 
 void command_free(void) {
