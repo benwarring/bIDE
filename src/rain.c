@@ -22,6 +22,18 @@
 #define MAX_TRAIL     16
 #define FLICKER_PCT   25        // chance per frame that a trail character changes
 
+/* The art overlay. After the rain, each art cell waits a random moment, then
+ * flickers through DISSOLVE_FLICKERS glyphs, FLICKER_STEP_MS each, before
+ * settling; every cell is settled by DISSOLVE_MS. */
+#ifndef BIDE_ROOT
+#define BIDE_ROOT     "."       // the Makefile passes the checkout; the wrapper runs us from anywhere
+#endif
+#define ART_PATH      BIDE_ROOT "/assets/bIDE.txt"
+#define ART_COLOR     231       // bright white, bold
+#define DISSOLVE_MS   700
+#define DISSOLVE_FLICKERS 4
+#define FLICKER_STEP_MS   70
+
 #define HEAD_COLOR    231       // 256-color white
 static const int TRAIL_COLORS[] = {48, 46, 40, 34, 28, 22};   // bright green to dark
 #define NTRAIL_COLORS (int)(sizeof(TRAIL_COLORS) / sizeof(TRAIL_COLORS[0]))
@@ -174,13 +186,77 @@ static void emit_style(const Style *s) {
     emit(buf, (size_t)n);
 }
 
+/* ---------------------------------------------------------------- art --- */
+
+/**
+ * The art, centered by its widest line, as a screen-sized grid in which "" marks
+ * a transparent cell (a space, or outside the art). NULL if the file is missing,
+ * empty, or does not fit. Widths count characters, not bytes: the art is
+ * typically block characters, three bytes each.
+ */
+static Cell *load_art(const char *path, int rows, int cols) {
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) return NULL;                        // no art is not an error
+
+    static char text[1 << 16];
+    size_t n = fread(text, 1, sizeof(text) - 1, fp);
+    fclose(fp);
+    text[n] = '\0';
+
+    int w = 0, h = 0, lw = 0, line = 0;
+    for (char *p = text;; p++) {
+        if (*p == '\n' || *p == '\0') {
+            if (lw > 0) h = line + 1;                   // trailing blank lines don't count
+            if (lw > w) w = lw;
+            lw = 0;
+            line++;
+            if (*p == '\0') break;
+        } else if (*p != '\r' && ((unsigned char)*p & 0xC0) != 0x80) {
+            lw++;
+        }
+    }
+    if (w == 0 || w > cols || h > rows) return NULL;
+
+    Cell *art = Malloc(sizeof(Cell) * (size_t)(rows * cols));
+    for (int i = 0; i < rows * cols; i++) art[i].ch[0] = '\0';
+
+    const Style st = {1000 + ART_COLOR, 49, 1, 0, 0};
+    int top = (rows - h) / 2, left = (cols - w) / 2;
+    int y = 0, x = -1;
+    for (char *p = text; *p && y < h; p++) {
+        unsigned char b = (unsigned char)*p;
+        if (b == '\n') { y++; x = -1; continue; }
+        if (b == '\r') continue;
+
+        if ((b & 0xC0) == 0x80) {                       // continuation of the character at x
+            if (x < 0) continue;
+            char *ch = art[(top + y) * cols + left + x].ch;
+            size_t len = strlen(ch);
+            if (len > 0 && len < sizeof(art[0].ch) - 1) { ch[len] = (char)b; ch[len + 1] = '\0'; }
+            continue;
+        }
+
+        x++;
+        if (b == ' ' || b < 0x20) continue;             // transparent
+        Cell *c = &art[(top + y) * cols + left + x];
+        c->ch[0] = (char)b;
+        c->ch[1] = '\0';
+        c->st = st;
+    }
+    return art;
+}
+
 /* ------------------------------------------------------------ the rain --- */
 
 typedef struct {
     int delay_ms, fall_ms, trail;
 } Drop;
 
-void rain_play(void) {
+static char random_glyph(void) {
+    return GLYPHS[rnd(0, (int)sizeof(GLYPHS) - 2)];
+}
+
+void rain_play(const char *art_path) {
     int rows = E.screenrows + 2;                        // the frame includes both bars
     int cols = E.screencols;
 
@@ -203,9 +279,18 @@ void rain_play(void) {
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
 
     parse_frame(frame, flen, grid, rows, cols);
+    Cell *art = load_art(art_path ? art_path : ART_PATH, rows, cols);
+    int *settle = Malloc(sizeof(int) * (size_t)(rows * cols));    // art: when its flicker starts
+    signed char *step = Malloc((size_t)(rows * cols));             // art: flicker step last drawn
+
+    // if the flickers alone outlast DISSOLVE_MS, the dissolve stretches to fit them
+    int latest = DISSOLVE_MS - DISSOLVE_FLICKERS * FLICKER_STEP_MS;
+    long dissolve_ms = latest > 0 ? DISSOLVE_MS : DISSOLVE_FLICKERS * FLICKER_STEP_MS;
     for (int i = 0; i < rows * cols; i++) {
         shown[i].ch[0] = '\0';                          // the shell's text, which we can't know
-        glyph[i] = GLYPHS[rnd(0, (int)sizeof(GLYPHS) - 2)];
+        glyph[i] = random_glyph();
+        settle[i] = rnd(0, latest > 0 ? latest : 0);
+        step[i] = -1;
     }
 
     for (int x = 0; x < cols; x++) {
@@ -217,11 +302,12 @@ void rain_play(void) {
     Write(STDOUT_FILENO, "\x1b[?25l", 6);
     const Style head_style = {1000 + HEAD_COLOR, 49, 1, 0, 0};
     long start = MonotonicMs();
+    long dissolve_at = -1;                              // set once every column has finished
     int skipped = 0;
 
     for (int frameno = 1;; frameno++) {
         long t = MonotonicMs() - start;                 // clock time, so a slow terminal ends on time
-        int done = 1;
+        int rained = 1;
         int cr = -1, cc = -1;                           // where the terminal's cursor is, if known
         Style cur = {-1, -1, 0, 0, 0};                  // matches nothing: first cell sets a style
         outlen = 0;
@@ -232,19 +318,34 @@ void rain_play(void) {
             if (p < 0) p = 0;
             if (p > d->fall_ms) p = d->fall_ms;
             int h = (int)((long)(rows + d->trail) * p / d->fall_ms);   // head sits at row h-1
-            if (h < rows + d->trail) done = 0;
+            if (h < rows + d->trail) rained = 0;
 
-            for (int y = 0; y < rows && y < h; y++) {   // below the head: still the shell's
+            for (int y = 0; y < rows; y++) {
                 int i = y * cols + x;
                 int dist = h - 1 - y;                   // 0 at the head
+                long into = dissolve_at < 0 ? -1 : t - dissolve_at - settle[i];
+                int k = into < 0 ? -1 : (int)(into / FLICKER_STEP_MS);
                 Cell want;
 
-                if (dist >= d->trail) {
+                if (art && art[i].ch[0] && k < 0) {
+                    want = art[i];                      // the art sits above the rain
+                } else if (art && art[i].ch[0] && k < DISSOLVE_FLICKERS) {
+                    if (step[i] != k) {                 // a new glyph per step, not per frame
+                        step[i] = (signed char)k;
+                        glyph[i] = random_glyph();
+                    }
+                    want.ch[0] = glyph[i];
+                    want.ch[1] = '\0';
+                    want.st = PLAIN;
+                    want.st.fg = (short)(1000 + TRAIL_COLORS[k * NTRAIL_COLORS / DISSOLVE_FLICKERS]);
+                } else if (art && art[i].ch[0]) {
+                    want = grid[i];                     // dissolved
+                } else if (y >= h) {
+                    continue;                           // below the head: still the shell's
+                } else if (dist >= d->trail) {
                     want = grid[i];                     // uncovered
                 } else {
-                    if (dist == 0 || rnd(1, 100) <= FLICKER_PCT) {
-                        glyph[i] = GLYPHS[rnd(0, (int)sizeof(GLYPHS) - 2)];
-                    }
+                    if (dist == 0 || rnd(1, 100) <= FLICKER_PCT) glyph[i] = random_glyph();
                     want.ch[0] = glyph[i];
                     want.ch[1] = '\0';
                     if (dist == 0) {
@@ -274,7 +375,10 @@ void rain_play(void) {
         }
 
         if (outlen) Write(STDOUT_FILENO, out, outlen); // one write per frame, changed cells only
-        if (done) break;
+
+        // this frame was drawn with every art cell settled, so the screen is the frame
+        if (rained && (!art || (dissolve_at >= 0 && t - dissolve_at >= dissolve_ms))) break;
+        if (rained && dissolve_at < 0) dissolve_at = t;
 
         long wait = start + (long)frameno * 1000 / RAIN_FPS - MonotonicMs();
         struct pollfd pfd = {STDIN_FILENO, POLLIN, 0};
@@ -304,4 +408,7 @@ void rain_play(void) {
     free(shown);
     free(glyph);
     free(drops);
+    free(art);
+    free(settle);
+    free(step);
 }

@@ -123,9 +123,10 @@ static void run(void) {
 
 int main(int argc, char *argv[]) {
     int rain = 1;
-    const char *file = NULL;
+    const char *file = NULL, *art = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--no-rain") == 0) rain = 0;
+        else if (strcmp(argv[i], "--art") == 0 && i + 1 < argc) art = argv[++i];
         else if (file == NULL) file = argv[i];
     }
 
@@ -137,7 +138,7 @@ int main(int argc, char *argv[]) {
     command_load_keymap();
 
     // either way, the alternate screen is up with the first frame on it after this
-    if (rain) rain_play();
+    if (rain) rain_play(art);
     else enter_alt_screen();
 
     run();

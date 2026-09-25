@@ -2,6 +2,9 @@ CC = gcc
 # -MMD -MP emit a .d file per object listing the headers it included, so editing
 # a header rebuilds everything that includes it
 CFLAGS = -Wall -Wextra -pedantic -std=c17 -g -D_DEFAULT_SOURCE -I$(INCLUDE) -MMD -MP
+# where the checkout is, so bin/main finds assets/ when launched from anywhere.
+# Kept out of CFLAGS so `make asan` (which replaces CFLAGS) still gets it.
+CPPFLAGS = -DBIDE_ROOT='"$(CURDIR)"'
 
 SRC = src
 OBJ = obj
@@ -21,7 +24,7 @@ $(TARGET): $(OBJS)
 
 $(OBJ)/%.o: $(SRC)/%.c
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 -include $(DEPS)
 

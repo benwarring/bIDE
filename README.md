@@ -46,10 +46,13 @@ Needs `gcc` (or `clang`), `make`, and a POSIX terminal — Linux, macOS, or WSL.
 make          # -> bin/main
 ./bin/main src/main.c
 ./bin/main --no-rain src/main.c   # skip the startup effect
+./bin/main --art logo.txt src/main.c   # different art over the rain
 ```
 
-On startup, Matrix rain falls over the terminal and uncovers the editor. Any
-key skips it.
+On startup, Matrix rain falls over the terminal and uncovers the editor, with
+[`assets/bIDE.txt`](assets/bIDE.txt) held above it until it dissolves into the
+editor too. Any key skips it. Art that is missing or bigger than the terminal is
+left out; spaces in it are transparent.
 
 Optional extras:
 
