@@ -138,6 +138,7 @@ int main(int argc, char *argv[]) {
     // either way, the alternate screen is up with the first frame on it after this
     if (rain) rain_play(art);
     else enter_alt_screen();
+    enable_key_reporting();                             // not before: the alternate screen keeps its own
 
     run();
     cleanup();

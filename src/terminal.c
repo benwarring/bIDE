@@ -21,11 +21,16 @@ volatile sig_atomic_t resize_pending = 0;
 #define MOUSE_ON  "\x1b[?1002h\x1b[?1006h\x1b[?2004h"
 #define MOUSE_OFF "\x1b[?2004l\x1b[?1006l\x1b[?1002l"
 
-/* Ask for modified keys as escape sequences, so a Ctrl-Shift-letter bound in
- * keys.conf is not just Ctrl-letter (no default binding relies on it).
+/* Ask for modified keys as escape sequences, so Ctrl-Shift-Q (and any
+ * Ctrl-Shift-letter bound in keys.conf) is not just Ctrl-letter, or nothing.
  * ">1u" pushes the kitty keyboard protocol's disambiguate mode, "<u" pops it;
  * ">4;1m" is xterm's modifyOtherKeys. A terminal that knows neither ignores
- * both and keeps sending plain control bytes. */
+ * both and keeps sending plain control bytes.
+ *
+ * The kitty mode is kept per screen: VS Code's terminal swaps it out on entering
+ * the alternate screen and back on leaving. So it is pushed only once the
+ * alternate screen is up, and popped before leaving it; pushed any earlier, the
+ * editor would run without it and the shell would be left with it afterwards. */
 #define KEYS_ON  "\x1b[>1u\x1b[>4;1m"
 #define KEYS_OFF "\x1b[>4m\x1b[<u"
 
@@ -104,7 +109,11 @@ void enable_raw_mode(void) {
     Tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
     // the alternate screen waits: the startup effect runs on the main one first
-    Write(STDOUT_FILENO, MOUSE_ON KEYS_ON, sizeof(MOUSE_ON KEYS_ON) - 1);
+    Write(STDOUT_FILENO, MOUSE_ON, sizeof(MOUSE_ON) - 1);
+}
+
+void enable_key_reporting(void) {
+    Write(STDOUT_FILENO, KEYS_ON, sizeof(KEYS_ON) - 1);
 }
 
 void terminal_set_clipboard(const char *s, size_t n) {

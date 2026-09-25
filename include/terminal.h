@@ -20,8 +20,12 @@ extern volatile sig_atomic_t resize_pending;
 #define SCREEN_ON  "\x1b[?1049h"
 #define SCREEN_OFF "\x1b[?1049l"
 
-/** Raw mode, mouse and key reporting. Stays on the main screen. */
+/** Raw mode and mouse reporting. Stays on the main screen. */
 void enable_raw_mode(void);
+
+/** Modified keys as escape sequences. Only once the alternate screen is up:
+ * some terminals keep this mode separately for each screen. */
+void enable_key_reporting(void);
 
 /** For when there is no startup effect to do it as part of its last frame. */
 void enter_alt_screen(void);
