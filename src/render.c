@@ -40,13 +40,6 @@ static void ab_appendstr(abuf *ab, const char *s) {
     ab_append(ab, s, strlen(s));
 }
 
-static void ab_free(abuf *ab) {
-    free(ab->b);
-    ab->b = NULL;
-    ab->len = 0;
-    ab->cap = 0;
-}
-
 // scratch space for materializing one line, and its highlights, per draw
 static char *linebuf = NULL;
 static size_t linebuf_cap = 0;
@@ -488,6 +481,13 @@ static void draw_message_bar(abuf *ab) {
 }
 
 void editor_refresh_screen(void) {
+    size_t len;
+    char *frame = render_frame(&len);
+    Write(STDOUT_FILENO, frame, len);                   // exactly one write per frame
+    free(frame);
+}
+
+char *render_frame(size_t *len) {
     editor_scroll();
 
     abuf ab = ABUF_INIT;
@@ -514,8 +514,8 @@ void editor_refresh_screen(void) {
 
     ab_appendstr(&ab, "\x1b[?25h");
 
-    Write(STDOUT_FILENO, ab.b, ab.len);                 // exactly one write per frame
-    ab_free(&ab);
+    *len = ab.len;
+    return ab.b;                                        // the caller owns it now
 }
 
 void editor_set_status_message(const char *fmt, ...) {

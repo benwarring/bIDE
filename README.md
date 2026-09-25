@@ -45,7 +45,11 @@ Needs `gcc` (or `clang`), `make`, and a POSIX terminal — Linux, macOS, or WSL.
 ```sh
 make          # -> bin/main
 ./bin/main src/main.c
+./bin/main --no-rain src/main.c   # skip the startup effect
 ```
+
+On startup, Matrix rain falls over the terminal and uncovers the editor. Any
+key skips it.
 
 Optional extras:
 
@@ -124,7 +128,8 @@ are fixed. A bad line is skipped and reported on the status line.
 include/          public headers, one per module
 src/
   main.c          poll loop and startup
-  terminal.c      raw mode, window size, SIGWINCH
+  terminal.c      raw mode, window size, SIGWINCH, restore on crash
+  rain.c          the startup effect
   buffer.c        rows, files, open buffers
   input.c         key decoding and editing operations
   render.c        the screen, status bar, prompts

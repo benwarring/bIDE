@@ -1,6 +1,8 @@
 #ifndef RENDER_H
 #define RENDER_H
 
+#include <stddef.h>
+
 /**
  * A list overlay drawn on top of the text area: a query line plus a scrollable
  * list of candidates. The list widget fills this in and hands it to the
@@ -45,6 +47,13 @@ void render_set_popup(Popup *p);
 void editor_scroll(void);
 
 void editor_refresh_screen(void);
+
+/**
+ * The frame editor_refresh_screen would write, as a malloc'd buffer the caller
+ * frees, without writing it. The startup effect needs the first frame in hand
+ * before it is allowed onto the screen.
+ */
+char *render_frame(size_t *len);
 
 void editor_set_status_message(const char *fmt, ...);
 

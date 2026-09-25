@@ -18,18 +18,6 @@ volatile sig_atomic_t resize_pending = 0;
 #define MOUSE_ON  "\x1b[?1000h\x1b[?1006h"
 #define MOUSE_OFF "\x1b[?1006l\x1b[?1000l"
 
-/* 1049 is the alternate screen buffer: a second, scrollback-less screen that
- * the terminal swaps in whole. Entering saves the real screen and hands us a
- * blank one; leaving restores the real screen exactly as it was. Every frame we
- * draw lands there and nothing reaches the scrollback, which is what stops a
- * session leaving a wall of editor frames behind in the terminal history.
- *
- * This is how vim and less behave, and it is a single pair of sequences rather
- * than any clearing of our own — clearing with \x1b[2J would still scroll the
- * old contents away permanently. */
-#define SCREEN_ON  "\x1b[?1049h"
-#define SCREEN_OFF "\x1b[?1049l"
-
 /* Ask for modified keys as escape sequences, so Ctrl-Shift-K is not just Ctrl-K.
  * ">1u" pushes the kitty keyboard protocol's disambiguate mode, "<u" pops it;
  * ">4;1m" is xterm's modifyOtherKeys. A terminal that knows neither ignores
@@ -42,14 +30,18 @@ volatile sig_atomic_t resize_pending = 0;
  * they are back so the atexit handler is a no-op after die() has already run. */
 static int termios_saved = 0;
 
-// runs from atexit, so it uses tcsetattr and write directly: the wrappers die()
-// on failure, and calling exit() from an exit handler is undefined behavior
+// colors off and the cursor back, in case we left mid-frame or mid-rain
+#define RESET "\x1b[m\x1b[?25h"
+
+// runs from atexit and from fatal signal handlers, so it uses tcsetattr and write
+// directly: both are async-signal-safe, and the wrappers die() on failure, which
+// calls exit() — undefined behavior from an exit handler
 static void restore_terminal(void) {
     if (!termios_saved) return;
     termios_saved = 0;
 
-    ssize_t n = write(STDOUT_FILENO, KEYS_OFF MOUSE_OFF SCREEN_OFF,
-                      sizeof(KEYS_OFF MOUSE_OFF SCREEN_OFF) - 1);
+    ssize_t n = write(STDOUT_FILENO, KEYS_OFF MOUSE_OFF SCREEN_OFF RESET,
+                      sizeof(KEYS_OFF MOUSE_OFF SCREEN_OFF RESET) - 1);
     (void)n;                                            // failing here changes nothing we can act on
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);  // restore original terminal settings
 }
@@ -70,10 +62,31 @@ int die(const char *s) {
     exit(1);
 }
 
+/* A crash or a kill skips atexit, and would leave the shell in raw mode with no
+ * echo and no cursor. SA_RESETHAND puts the default action back, so re-raising
+ * still dies the way it would have (core dump and all). */
+static void on_fatal_signal(int sig) {
+    restore_terminal();
+    raise(sig);
+}
+
+static void install_fatal_handlers(void) {
+    static const int SIGNALS[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT,
+                                  SIGTERM, SIGHUP, SIGINT, SIGQUIT};
+    struct sigaction sa;
+    sa.sa_handler = on_fatal_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+    for (size_t i = 0; i < sizeof(SIGNALS) / sizeof(SIGNALS[0]); i++) {
+        Sigaction(SIGNALS[i], &sa, NULL);
+    }
+}
+
 void enable_raw_mode(void) {
     Tcgetattr(STDIN_FILENO, &orig_termios);             // get current terminal settings
     termios_saved = 1;
     atexit(restore_terminal);                           // register restore_terminal to be called at exit
+    install_fatal_handlers();
 
     struct termios raw = orig_termios;
 
@@ -86,7 +99,12 @@ void enable_raw_mode(void) {
     raw.c_cc[VTIME] = 1;
     Tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
-    Write(STDOUT_FILENO, SCREEN_ON MOUSE_ON KEYS_ON, sizeof(SCREEN_ON MOUSE_ON KEYS_ON) - 1);
+    // the alternate screen waits: the startup effect runs on the main one first
+    Write(STDOUT_FILENO, MOUSE_ON KEYS_ON, sizeof(MOUSE_ON KEYS_ON) - 1);
+}
+
+void enter_alt_screen(void) {
+    Write(STDOUT_FILENO, SCREEN_ON, sizeof(SCREEN_ON) - 1);
 }
 
 /**

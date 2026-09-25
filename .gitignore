@@ -3,6 +3,7 @@ milestone_plans/
 .vscode/
 annoyances.md
 test_files/
+assets/.bIDE
 
 # object files
 obj/

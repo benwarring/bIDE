@@ -10,6 +10,7 @@
 #include "editor.h"
 #include "input.h"
 #include "lsp.h"
+#include "rain.h"
 #include "render.h"
 #include "terminal.h"
 #include "undo.h"
@@ -116,17 +117,28 @@ static void run(void) {
         }
     }
 
-    // nothing to clear on the way out: leaving the alternate screen puts the
-    // terminal back exactly as it was found, which clearing could not do
+    // nothing to clear on the way out: leaving the alternate screen puts back the
+    // main screen as it was left (with the rain, deliberately blank)
 }
 
 int main(int argc, char *argv[]) {
+    int rain = 1;
+    const char *file = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--no-rain") == 0) rain = 0;
+        else if (file == NULL) file = argv[i];
+    }
+
     enable_raw_mode();
     editor_init();
     lsp_init();
 
-    buffer_open(argc >= 2 ? argv[1] : NULL);
+    buffer_open(file);
     command_load_keymap();
+
+    // either way, the alternate screen is up with the first frame on it after this
+    if (rain) rain_play();
+    else enter_alt_screen();
 
     run();
     cleanup();
