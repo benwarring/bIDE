@@ -1,6 +1,8 @@
 #ifndef INPUT_H
 #define INPUT_H
 
+#include "editor.h"
+
 #define CTRL_KEY(k) ((k) & 0x1F)
 
 /**
@@ -53,6 +55,17 @@ void editor_undo(void);
 void editor_redo(void);
 
 void editor_mouse_click(void);
+void editor_mouse_drag(void);
+
+void editor_cut(void);
+void editor_copy(void);
+void editor_paste(void);
+
+/**
+ * The focused view's selection, start before end, clamped into the buffer.
+ * Returns 0 if there is none or it is empty.
+ */
+int editor_selection(bpos *start, bpos *end);
 void editor_wheel_up(void);
 void editor_wheel_down(void);
 

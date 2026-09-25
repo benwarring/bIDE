@@ -9,6 +9,7 @@
 #include "buffer.h"
 #include "editor.h"
 #include "lsp.h"
+#include "pane.h"
 #include "syntax.h"
 #include "terminal.h"
 #include "undo.h"
@@ -127,18 +128,25 @@ static Buffer *buffer_new(void) {
 static void attach(Buffer *b) {
     E.bufs = Realloc(E.bufs, sizeof(Buffer *) * (size_t)(E.nbufs + 1));
     E.bufs[E.nbufs++] = b;
+    buffer_show(editor_view(), b);                      // load into the new buffer
+}
 
-    View *v = Malloc(sizeof(View));
+void buffer_show(View *v, Buffer *b) {
+    if (v->buf == b) return;
+
+    if (v->buf) {
+        v->buf->last = (bpos){v->cy, v->cx};
+        v->buf->last_rowoff = v->rowoff;
+    }
     v->buf = b;
-    v->cx = v->cy = v->rx = 0;
-    v->rowoff = v->coloff = 0;
-    v->extra = NULL;
-    v->nextra = 0;
+    v->nextra = 0;                                      // switching files is navigation
+    v->selecting = 0;
+    if (b == NULL) return;
 
-    E.views = Realloc(E.views, sizeof(View *) * (size_t)(E.nviews + 1));
-    E.views[E.nviews++] = v;
-
-    E.active = E.nbufs - 1;                             // load into the new buffer
+    v->cy = b->last.cy;
+    v->cx = b->last.cx;
+    v->rowoff = b->last_rowoff;
+    v->coloff = 0;
 }
 
 /**
@@ -188,7 +196,7 @@ int buffer_open(const char *filename) {
         for (int i = 0; i < E.nbufs; i++) {
             if (E.bufs[i]->path && strcmp(E.bufs[i]->path, want) == 0) {
                 free(want);
-                E.active = i;
+                buffer_show(editor_view(), E.bufs[i]);
                 return i;
             }
         }
@@ -198,7 +206,7 @@ int buffer_open(const char *filename) {
     attach(buffer_new());
     load_into_current(filename);
     lsp_open_document(editor_buffer());                 // starts a server if this language has one
-    return E.active;
+    return E.nbufs - 1;
 }
 
 int buffer_count(void) {
@@ -206,7 +214,10 @@ int buffer_count(void) {
 }
 
 int buffer_active(void) {
-    return E.active;
+    for (int i = 0; i < E.nbufs; i++) {
+        if (E.bufs[i] == editor_buffer()) return i;
+    }
+    return 0;
 }
 
 const char *buffer_name(int idx) {
@@ -217,21 +228,22 @@ const char *buffer_name(int idx) {
 int buffer_is_dirty(int idx) {
     if (idx < 0 || idx >= E.nbufs) return 0;
 
-    int prev = E.active;
-    E.active = idx;
+    View *v = editor_view();
+    Buffer *prev = v->buf;
+    v->buf = E.bufs[idx];
     int dirty = undo_is_dirty();
-    E.active = prev;
+    v->buf = prev;
     return dirty;
 }
 
 void buffer_switch(int idx) {
     if (idx < 0 || idx >= E.nbufs) return;
-    E.active = idx;                                     // cursor and scroll ride along in the View
+    buffer_show(editor_view(), E.bufs[idx]);
 }
 
 void buffer_cycle(int delta) {
     if (E.nbufs == 0) return;
-    E.active = ((E.active + delta) % E.nbufs + E.nbufs) % E.nbufs;
+    buffer_switch(((buffer_active() + delta) % E.nbufs + E.nbufs) % E.nbufs);
 }
 
 static void free_buffer(Buffer *b) {
@@ -251,36 +263,28 @@ static void free_buffer(Buffer *b) {
 void buffer_close(int idx) {
     if (idx < 0 || idx >= E.nbufs) return;
 
-    free_buffer(E.bufs[idx]);
-    free(E.views[idx]->extra);
-    free(E.views[idx]);
-
+    Buffer *dead = E.bufs[idx];
     memmove(&E.bufs[idx], &E.bufs[idx + 1], sizeof(Buffer *) * (size_t)(E.nbufs - idx - 1));
-    memmove(&E.views[idx], &E.views[idx + 1], sizeof(View *) * (size_t)(E.nviews - idx - 1));
     E.nbufs--;
-    E.nviews--;
 
     // closing the last buffer leaves an empty one rather than no buffer at all,
-    // so nothing downstream has to cope with a dangling active index
-    if (E.nbufs == 0) {
-        E.active = 0;
-        buffer_open(NULL);
-        return;
+    // so no pane is ever left showing nothing
+    if (E.nbufs == 0) buffer_open(NULL);
+    Buffer *next = E.bufs[idx < E.nbufs ? idx : E.nbufs - 1];
+
+    int n;
+    View **views = pane_views(&n);
+    for (int i = 0; i < n; i++) {
+        if (views[i]->buf == dead) buffer_show(views[i], next);
     }
-    if (E.active >= E.nbufs) E.active = E.nbufs - 1;
+    free_buffer(dead);                                  // last: moving a pane off it writes to it
 }
 
 void buffer_free(void) {
-    for (int i = 0; i < E.nbufs; i++) {
-        free_buffer(E.bufs[i]);
-        free(E.views[i]->extra);
-        free(E.views[i]);
-    }
+    for (int i = 0; i < E.nbufs; i++) free_buffer(E.bufs[i]);
     free(E.bufs);
-    free(E.views);
     E.bufs = NULL;
-    E.views = NULL;
-    E.nbufs = E.nviews = E.active = 0;
+    E.nbufs = 0;
 }
 
 void buffer_set_filename(const char *filename) {

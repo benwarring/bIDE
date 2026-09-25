@@ -7,7 +7,9 @@
 #include "editor.h"
 #include "wrappers.h"
 
-#define MAX_UNDO 4096           // a long session must not grow without bound
+// ponytail: one record per byte, so a big paste or delete spends this fast; runs of
+// text per record would stretch it if history ever feels short
+#define MAX_UNDO 65536          // a long session must not grow without bound
 
 typedef struct {
     undo_type type;
@@ -77,14 +79,19 @@ static void stack_free(undo_stack *st) {
 }
 
 /**
- * Drops the oldest record once the stack is full. The saved-depth marker refers
- * to a position in this array, so it has to shift too.
+ * Drops the oldest action, all of its records at once, once the stack is full.
+ * Dropping single records would leave an action half on the stack, and undoing
+ * it would bring back only part of what it removed. The saved-depth marker
+ * refers to a position in this array, so it has to shift too.
  */
 static void drop_oldest(UndoState *u, undo_stack *s) {
-    memmove(&s->recs[0], &s->recs[1], sizeof(undo_rec) * (size_t)(s->len - 1));
-    s->len--;
-    if (u->saved_depth > 0) u->saved_depth--;
-    else if (u->saved_depth == 0) u->saved_depth = -1;  // the saved state fell off the end
+    int k = 0;
+    while (k < s->len && s->recs[k].group == s->recs[0].group) k++;
+
+    memmove(&s->recs[0], &s->recs[k], sizeof(undo_rec) * (size_t)(s->len - k));
+    s->len -= k;
+    if (u->saved_depth >= k) u->saved_depth -= k;
+    else if (u->saved_depth >= 0) u->saved_depth = -1;  // the saved state fell off the end
 }
 
 void undo_destroy(UndoState *u) {
@@ -162,7 +169,10 @@ void undo_record(undo_type type, int cy, int cx, char c) {
     // no longer reachable by undoing, so the file can never look clean again
     if (u->saved_depth > u->undo_st.len) u->saved_depth = -1;
 
-    if (u->undo_st.len == MAX_UNDO) drop_oldest(u, &u->undo_st);
+    // the action being recorded never goes: however big it grows, it undoes whole
+    if (u->undo_st.len >= MAX_UNDO && u->undo_st.recs[0].group != u->cur_group) {
+        drop_oldest(u, &u->undo_st);
+    }
 
     View *v = editor_view();
     undo_rec rec = {type, cy, cx, c, v->cy, v->cx, u->cur_group};

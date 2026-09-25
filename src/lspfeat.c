@@ -131,7 +131,7 @@ void lsp_jump_to(const char *path, int line, int character) {
     editor_clamp_cursor();
 
     // land the target near the middle rather than glued to the top edge
-    v->rowoff = v->cy - E.screenrows / 3;
+    v->rowoff = v->cy - v->rows / 3;
     if (v->rowoff < 0) v->rowoff = 0;
 
     editor_request_redraw();

@@ -26,11 +26,18 @@ typedef void (*buffer_hook_fn)(undo_type op, int cy, int cx, void *ctx);
 void buffer_set_hook(buffer_hook_fn fn, void *ctx);
 
 /**
- * Opens a file into a new buffer and makes it active. If that file is already
- * open (compared by resolved path), switches to the existing buffer instead of
- * opening a divergent second copy. Returns the buffer index.
+ * Opens a file into a new buffer and shows it in the focused pane. If that file
+ * is already open (compared by resolved path), shows the existing buffer instead
+ * of opening a divergent second copy. Returns the buffer index.
  */
 int buffer_open(const char *filename);
+
+/**
+ * Points view `v` at buffer `b`, or at nothing if `b` is NULL. The buffer it
+ * leaves remembers where the cursor was, and `b` comes up wherever the last
+ * view to leave it had it.
+ */
+void buffer_show(View *v, Buffer *b);
 
 int buffer_count(void);
 int buffer_active(void);
@@ -41,8 +48,9 @@ void buffer_switch(int idx);
 void buffer_cycle(int delta);
 
 /**
- * Frees everything the buffer owns and drops it from the list. Closing the last
- * buffer leaves a fresh empty one, so the active index is never dangling.
+ * Frees everything the buffer owns and drops it from the list. Every pane that
+ * showed it moves to its neighbour in the list. Closing the last buffer leaves a
+ * fresh empty one, so no pane is ever left showing nothing.
  */
 void buffer_close(int idx);
 

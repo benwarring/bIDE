@@ -87,8 +87,8 @@ static void sync_render(void) {
     pv.top = top;
     pv.height = height;
     pv.width = width;
-    pv.row = anchor_cy - v->rowoff;
-    pv.col = buffer_cx_to_rx(anchor_cy, anchor_cx) - v->coloff + E.gutter;
+    pv.row = v->top + anchor_cy - v->rowoff;
+    pv.col = v->left + v->gutter + buffer_cx_to_rx(anchor_cy, anchor_cx) - v->coloff;
 
     render_set_popup(&pv);
 }

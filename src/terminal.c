@@ -13,12 +13,16 @@ static struct termios orig_termios;
 
 volatile sig_atomic_t resize_pending = 0;
 
-/* 1000 = report button presses, 1006 = SGR coordinates, which unlike the
- * original encoding are plain decimal and so work past column 223. */
-#define MOUSE_ON  "\x1b[?1000h\x1b[?1006h"
-#define MOUSE_OFF "\x1b[?1006l\x1b[?1000l"
+/* 1002 = report button presses and releases, and movement while a button is
+ * held, which is what dragging a selection needs. 1006 = SGR coordinates, which
+ * unlike the original encoding are plain decimal and so work past column 223.
+ * 2004 = bracketed paste: the terminal wraps pasted text in markers, so it can
+ * go in literally instead of being typed out one auto-closed bracket at a time. */
+#define MOUSE_ON  "\x1b[?1002h\x1b[?1006h\x1b[?2004h"
+#define MOUSE_OFF "\x1b[?2004l\x1b[?1006l\x1b[?1002l"
 
-/* Ask for modified keys as escape sequences, so Ctrl-Shift-K is not just Ctrl-K.
+/* Ask for modified keys as escape sequences, so a Ctrl-Shift-letter bound in
+ * keys.conf is not just Ctrl-letter (no default binding relies on it).
  * ">1u" pushes the kitty keyboard protocol's disambiguate mode, "<u" pops it;
  * ">4;1m" is xterm's modifyOtherKeys. A terminal that knows neither ignores
  * both and keeps sending plain control bytes. */
@@ -101,6 +105,27 @@ void enable_raw_mode(void) {
 
     // the alternate screen waits: the startup effect runs on the main one first
     Write(STDOUT_FILENO, MOUSE_ON KEYS_ON, sizeof(MOUSE_ON KEYS_ON) - 1);
+}
+
+void terminal_set_clipboard(const char *s, size_t n) {
+    static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    char *out = Malloc(4 * ((n + 2) / 3) + 16);
+    size_t o = (size_t)sprintf(out, "\x1b]52;c;");
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned long v = (unsigned long)(unsigned char)s[i] << 16;
+        if (i + 1 < n) v |= (unsigned long)(unsigned char)s[i + 1] << 8;
+        if (i + 2 < n) v |= (unsigned char)s[i + 2];
+
+        out[o++] = B64[v >> 18 & 63];
+        out[o++] = B64[v >> 12 & 63];
+        out[o++] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+        out[o++] = i + 2 < n ? B64[v & 63] : '=';
+    }
+    out[o++] = '\a';
+
+    Write(STDOUT_FILENO, out, o);
+    free(out);
 }
 
 void enter_alt_screen(void) {

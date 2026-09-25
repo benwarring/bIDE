@@ -10,6 +10,7 @@
 #include "command.h"
 #include "editor.h"
 #include "lsp.h"
+#include "pane.h"
 #include "render.h"
 #include "terminal.h"
 #include "undo.h"
@@ -19,9 +20,17 @@
 
 /* ------------------------------------------------------------ key input --- */
 
-// where the last click landed, in 1-based screen coordinates
+// where the last click, drag or wheel notch landed, in 1-based screen coordinates
 static int mouse_x = 0;
 static int mouse_y = 0;
+
+// whether Shift was held on the last key read, which turns movement into selecting
+static int key_shift = 0;
+
+// the text of the last bracketed paste, for the PASTE key to put in
+static char *pasted = NULL;
+static size_t npasted = 0;
+static size_t pasted_cap = 0;
 
 /**
  * An SGR mouse report is "\x1b[<button;col;row" followed by M for press or m
@@ -47,16 +56,17 @@ static int read_mouse(void) {
     int button, x, y;
     if (!final || sscanf(buf, "%d;%d;%d", &button, &x, &y) != 3) return -1;
 
-    if (button == 64) return WHEEL_UP;
-    if (button == 65) return WHEEL_DOWN;
-
-    // low two bits pick the button; only a left-button *press* moves the cursor
-    if (final == 'M' && (button & 3) == 0) {
+    // low two bits pick the button, 32 means it moved while held; only the left
+    // button's press and drag do anything
+    int key = button == 64 ? WHEEL_UP
+            : button == 65 ? WHEEL_DOWN
+            : button == 32 ? MOUSE_DRAG
+            : final == 'M' && (button & 3) == 0 ? MOUSE_CLICK : -1;
+    if (key != -1) {
         mouse_x = x;
         mouse_y = y;
-        return MOUSE_CLICK;
     }
-    return -1;
+    return key;
 }
 
 /**
@@ -77,15 +87,42 @@ static int modified_key(int code, int mod) {
     if (!(bits & 4)) return -1;                         // Alt combinations: nothing uses them
 
     if (code == ' ') return 0;                          // Ctrl-Space, as NUL like before
+    if (code >= '[' && code <= '_') return code & 0x1F; // Ctrl-\ and Ctrl-], as their old control bytes
     if (code >= 'A' && code <= 'Z') code += 'a' - 'A';  // modifyOtherKeys reports the shifted letter
     if (code < 'a' || code > 'z') return -1;
     return (bits & 1) ? CTRL_SHIFT_KEY(code) : CTRL_KEY(code);
 }
 
 /**
+ * Everything up to the terminal's end-of-paste marker, read raw: inside a paste
+ * an escape byte is just text. Terminals strip the marker from what they paste,
+ * so the first one really is the end. A terminal that never sends it costs one
+ * read timeout.
+ */
+static int read_paste(void) {
+    static const char END[] = "\x1b[201~";
+    const size_t endlen = sizeof(END) - 1;
+
+    npasted = 0;
+    unsigned char c;
+    while (Read(STDIN_FILENO, &c, 1) == 1) {
+        if (npasted == pasted_cap) {
+            pasted_cap = pasted_cap ? pasted_cap * 2 : 256;
+            pasted = Realloc(pasted, pasted_cap);
+        }
+        pasted[npasted++] = (char)c;
+        if (npasted >= endlen && memcmp(pasted + npasted - endlen, END, endlen) == 0) {
+            npasted -= endlen;
+            break;
+        }
+    }
+    return PASTE;
+}
+
+/**
  * "\x1b[<params><final>" with numeric parameters: the ~ keys ("5~"), modified
  * arrows ("1;5C"), and modified keys in either extended form, xterm's
- * "27;<mod>;<code>~" or kitty's "<code>;<mod>u".
+ * "27;<mod>;<code>~" or kitty's "<code>;<mod>u". "200~" opens a paste.
  */
 static int read_csi(unsigned char first) {
     char buf[32];
@@ -103,11 +140,13 @@ static int read_csi(unsigned char first) {
     int p0 = 0, mod = 1, p2 = 0;                        // no modifier parameter means none
     int np = sscanf(buf, "%d;%d;%d", &p0, &mod, &p2);
     int ctrl = (mod - 1) & 4;
+    key_shift = (mod - 1) & 1;
 
     switch (final) {
         case 'u': return modified_key(p0, mod);
         case '~':
             if (np == 3 && p0 == 27) return modified_key(p2, mod);
+            if (p0 == 200) return read_paste();
             switch (p0) {
                 case 1: case 7: return HOME_KEY;
                 case 3:         return DEL_KEY;
@@ -128,6 +167,7 @@ static int read_csi(unsigned char first) {
 
 int editor_read_key(void) {
     unsigned char c;
+    key_shift = 0;
 
     if (Read(STDIN_FILENO, &c, 1) != 1) return -1;
     if (c != '\x1b') return c;
@@ -279,6 +319,36 @@ void editor_clamp_cursor(void) {
     v->cx = p.cx;
 }
 
+/* ----------------------------------------------------------- selection --- */
+
+// set by whatever wants the selection to outlive the key being handled
+static int keep_selection = 0;
+
+int editor_selection(bpos *start, bpos *end) {
+    View *v = editor_view();
+    if (!v->selecting) return 0;
+
+    bpos a = v->anchor, c = {v->cy, v->cx};
+    clamp_pos(&a);                                      // another pane may have edited under it
+
+    int anchor_first = a.cy < c.cy || (a.cy == c.cy && a.cx < c.cx);
+    *start = anchor_first ? a : c;
+    *end = anchor_first ? c : a;
+    return start->cy != end->cy || start->cx != end->cx;
+}
+
+/* The cursor is about to move and drag the selection with it, anchored where it
+ * stands now. A selection belongs to one cursor, so any extras collapse. */
+static void extend_selection(void) {
+    View *v = editor_view();
+    keep_selection = 1;
+    if (v->selecting) return;
+
+    editor_cursor_collapse();
+    v->anchor = (bpos){v->cy, v->cx};
+    v->selecting = 1;
+}
+
 static void op_left(bpos *p) {
     if (p->cx > 0) p->cx--;
     else if (p->cy > 0) {
@@ -329,10 +399,12 @@ static void op_down(bpos *p)  { if (p->cy < buffer_num_lines() - 1) p->cy++; cla
 static void op_start(bpos *p) { p->cx = 0; }
 static void op_end(bpos *p)   { p->cx = buffer_line_length(p->cy); }
 
-/** Movement applies to every cursor, so a multi-cursor selection survives it. */
+/** Movement applies to every cursor, so a multi-cursor selection survives it.
+ * With Shift held it selects instead. */
 static void multi_move(void (*op)(bpos *)) {
     View *v = editor_view();
     undo_break();                                       // edits either side of a move are separate
+    if (key_shift) extend_selection();
 
     bpos p = {v->cy, v->cx};
     op(&p);
@@ -360,6 +432,7 @@ void editor_line_end(void)   { multi_move(op_end); }
 static void jump_to(int cy) {
     View *v = editor_view();
     undo_break();
+    if (key_shift) extend_selection();                  // Shift-PgUp and Shift-PgDn select too
     editor_cursor_collapse();
 
     v->cy = cy;
@@ -369,28 +442,55 @@ static void jump_to(int cy) {
     v->cx = p.cx;
 }
 
-void editor_page_up(void)   { jump_to(editor_view()->cy - E.screenrows); }
-void editor_page_down(void) { jump_to(editor_view()->cy + E.screenrows); }
-void editor_wheel_up(void)   { jump_to(editor_view()->cy - WHEEL_LINES); }
-void editor_wheel_down(void) { jump_to(editor_view()->cy + WHEEL_LINES); }
+/* The mouse acts on the pane under it, so that pane takes focus first. NULL for
+ * the message line, which belongs to no pane. */
+static View *focus_under_mouse(void) {
+    View *v = pane_at(mouse_y - 1, mouse_x - 1);
+    if (v) pane_focus(v);
+    return v;
+}
 
-void editor_mouse_click(void) {
-    View *v = editor_view();
+void editor_page_up(void)   { jump_to(editor_view()->cy - editor_view()->rows); }
+void editor_page_down(void) { jump_to(editor_view()->cy + editor_view()->rows); }
+void editor_wheel_up(void)   { if (focus_under_mouse()) jump_to(editor_view()->cy - WHEEL_LINES); }
+void editor_wheel_down(void) { if (focus_under_mouse()) jump_to(editor_view()->cy + WHEEL_LINES); }
 
-    int screen_row = mouse_y - 1;
-    if (screen_row >= E.screenrows) return;             // status bar or message line
-
+// the cursor to the text under a cell of pane v, counted from the pane's corner
+static void cursor_to_cell(View *v, int screen_row, int screen_col) {
     jump_to(screen_row + v->rowoff);
 
     // strip the gutter, then convert the rendered column back to a byte index so
     // a click past a tab lands where it looks like it should
-    int rx = (mouse_x - 1) - E.gutter + v->coloff;
+    int rx = screen_col - v->gutter + v->coloff;
     if (rx < 0) rx = 0;
     v->cx = buffer_rx_to_cx(v->cy, rx);
 
     bpos p = {v->cy, v->cx};
     clamp_pos(&p);
     v->cx = p.cx;
+}
+
+void editor_mouse_click(void) {
+    View *v = focus_under_mouse();
+    if (v == NULL) return;
+
+    int screen_row = mouse_y - 1 - v->top;
+    int screen_col = mouse_x - 1 - v->left;
+    if (screen_row >= v->rows || screen_col >= v->cols) return;   // its status bar or divider
+
+    cursor_to_cell(v, screen_row, screen_col);
+}
+
+/* Selects from where the button went down to wherever it is now. The drag stays
+ * in the pane it started in, so a mouse that wanders off is held to its edge. */
+void editor_mouse_drag(void) {
+    View *v = editor_view();
+    extend_selection();
+
+    int screen_row = mouse_y - 1 - v->top;
+    if (screen_row < 0) screen_row = 0;
+    if (screen_row >= v->rows) screen_row = v->rows - 1;
+    cursor_to_cell(v, screen_row, mouse_x - 1 - v->left);
 }
 
 /* ------------------------------------------------------------- editing --- */
@@ -444,9 +544,25 @@ static void op_insert(bpos *p, int c) {
     *p = buffer_insert_char(p->cy, p->cx, c);
 }
 
-static void op_newline(bpos *p, int c) {
+static void op_split(bpos *p, int c) {
     (void)c;
     *p = buffer_split_line(p->cy, p->cx);
+}
+
+/* The new line starts at the indentation of the one it came from, copied byte
+ * for byte so tabs stay tabs. Only the indentation left of the cursor counts:
+ * splitting inside it already carries the rest down. One undo step, like Enter
+ * without it. */
+static void op_newline(bpos *p, int c) {
+    int indent = 0;
+    while (indent < p->cx && (buffer_char_at(p->cy, indent) == ' ' ||
+                              buffer_char_at(p->cy, indent) == '\t')) indent++;
+
+    undo_begin_group();
+    int from = p->cy;
+    op_split(p, c);
+    for (int i = 0; i < indent; i++) *p = buffer_insert_char(p->cy, p->cx, buffer_char_at(from, i));
+    undo_end_group();
 }
 
 static void op_backspace(bpos *p, int c) {
@@ -514,12 +630,40 @@ static void on_mutation(undo_type op, int cy, int cx, void *ctx) {
     for (int i = 0; i < npending; i++) shift_pos(&pending[i].pos, op, cy, cx);
 }
 
+/* Deletes from s to e, leaving the cursor at s: one forward delete per byte in
+ * between, newlines included, all landing on s as the text closes up. */
+static void delete_range(bpos s, bpos e) {
+    View *v = editor_view();
+
+    int n = e.cx - s.cx;
+    for (int y = s.cy; y < e.cy; y++) n += buffer_line_length(y) + 1;
+    for (bpos p = s; n > 0; n--) op_delete_fwd(&p, 0);
+
+    v->cy = s.cy;
+    v->cx = s.cx;
+    v->selecting = 0;
+}
+
 /**
  * Runs one edit at every cursor. The whole set is a single undo group, because
  * the grouping heuristics see N edits scattered across the file and cannot know
  * they belong together — which is exactly why the markers are explicit.
+ *
+ * Over a selection, the edit replaces it: the selection goes first, and
+ * Backspace or Delete stop there. Both halves undo as one.
  */
 static void multi_edit(void (*op)(bpos *, int), int arg) {
+    bpos s, e;
+    int replacing = editor_selection(&s, &e);
+    if (replacing) {
+        undo_begin_group();
+        delete_range(s, e);
+        if (op == op_backspace || op == op_delete_fwd) {
+            undo_end_group();
+            return;
+        }
+    }
+
     Cur cur[MAX_EXTRA_CURSORS + 1];
     int n = gather(cur);
 
@@ -541,6 +685,7 @@ static void multi_edit(void (*op)(bpos *, int), int arg) {
     npending = 0;
 
     if (n > 1) undo_end_group();
+    if (replacing) undo_end_group();
 
     scatter(cur, n);
     merge_cursors();
@@ -550,6 +695,89 @@ void editor_insert_text(int c)     { multi_edit(op_insert, c); }
 void editor_insert_newline(void)   { multi_edit(op_newline, 0); }
 void editor_backspace(void)        { multi_edit(op_backspace, 0); }
 void editor_delete_forward(void)   { multi_edit(op_delete_fwd, 0); }
+
+/* ------------------------------------------------------ copy and paste --- */
+
+// what the last copy took, for Ctrl-V where the terminal lets it through
+static char *clip = NULL;
+static size_t nclip = 0;
+
+static void op_insert_raw(bpos *p, int c) {
+    *p = buffer_insert_char(p->cy, p->cx, c);
+}
+
+/**
+ * Pasted text goes in exactly as it came, at every cursor: no auto-closed
+ * brackets, no auto-indent on top of the indentation it already carries, no
+ * completion popping up, and a line break in any of the three conventions is
+ * one line break. The whole paste is one undo step.
+ */
+static void paste(const char *text, size_t len) {
+    undo_begin_group();
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == '\n' && i > 0 && text[i - 1] == '\r') continue;
+        if (c == '\r' || c == '\n') multi_edit(op_split, 0);
+        else if (c == '\t' || (c >= 32 && c != 127)) multi_edit(op_insert_raw, c);
+    }
+    undo_end_group();
+}
+
+/**
+ * The selection goes to the system clipboard through the terminal, so the
+ * terminal's own paste (and every other program) gets it, and is kept here for
+ * Ctrl-V in terminals that pass that key through. The selection stays, as it
+ * does everywhere else.
+ */
+void editor_copy(void) {
+    bpos s, e;
+    if (!editor_selection(&s, &e)) {
+        editor_set_status_message("Nothing selected");
+        return;
+    }
+    keep_selection = 1;
+
+    size_t cap = 1;
+    for (int y = s.cy; y <= e.cy; y++) cap += (size_t)buffer_line_length(y) + 1;
+    free(clip);
+    clip = Malloc(cap);
+
+    char *p = clip;
+    for (int y = s.cy; y <= e.cy; y++) {
+        int len = buffer_get_line(y, p, cap - (size_t)(p - clip));  // the whole line, then trimmed
+        int from = y == s.cy ? s.cx : 0;
+        int to = y == e.cy ? e.cx : len;
+        memmove(p, p + from, (size_t)(to - from));
+        p += to - from;
+        if (y < e.cy) *p++ = '\n';
+    }
+    nclip = (size_t)(p - clip);
+
+    terminal_set_clipboard(clip, nclip);
+    editor_set_status_message("Copied %zu byte%s", nclip, nclip == 1 ? "" : "s");
+}
+
+void editor_cut(void) {
+    bpos s, e;
+    if (!editor_selection(&s, &e)) {
+        editor_set_status_message("Nothing selected");
+        return;
+    }
+
+    editor_copy();
+    undo_begin_group();
+    delete_range(s, e);
+    undo_end_group();
+    editor_set_status_message("Cut %zu byte%s", nclip, nclip == 1 ? "" : "s");
+}
+
+void editor_paste(void) {
+    if (clip == NULL) {
+        editor_set_status_message("Nothing copied yet");
+        return;
+    }
+    paste(clip, nclip);
+}
 
 /* ------------------------------------------------------- extra cursors --- */
 
@@ -720,11 +948,18 @@ char *editor_prompt(const char *prompt, void (*callback)(char *, int)) {
 
 /* ------------------------------------------------------------ dispatch --- */
 
-int editor_process_keypress(int c) {
+static int dispatch(int c) {
     /* The completion popup gets first refusal, and refuses nearly everything: it
      * wants the arrows, Tab, Enter and Escape, and lets every other key straight
      * through to the buffer underneath. That is what makes it non-modal. */
     if (lsp_completion_key(c)) return 1;
+
+    if (c == PASTE) {
+        paste(pasted, npasted);
+        command_reset_quit();
+        lsp_completion_sync();
+        return 1;
+    }
 
     // key dispatch is now two lookups in data, not a switch: find the binding,
     // find its command, invoke it
@@ -743,4 +978,13 @@ int editor_process_keypress(int c) {
         lsp_completion_maybe_trigger(c);
     }
     return 1;
+}
+
+int editor_process_keypress(int c) {
+    keep_selection = 0;
+    int keep_running = dispatch(c);
+
+    // a selection lasts only as long as keys keep extending (or copying) it
+    if (!keep_selection) editor_view()->selecting = 0;
+    return keep_running;
 }

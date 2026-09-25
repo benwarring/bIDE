@@ -12,6 +12,7 @@
 #include "input.h"
 #include "list.h"
 #include "lsp.h"
+#include "pane.h"
 #include "render.h"
 #include "search.h"
 #include "undo.h"
@@ -97,8 +98,22 @@ static void cmd_file_refresh(void) {
     editor_set_status_message("File list will be rescanned on next open");
 }
 
+static int avail_many_panes(void) {
+    int n;
+    pane_views(&n);
+    return n > 1;
+}
+
+static void cmd_pane_split_right(void) { pane_split(1); }
+static void cmd_pane_split_down(void)  { pane_split(0); }
+static void cmd_pane_left(void)        { pane_focus_dir(0, -1); }
+static void cmd_pane_right(void)       { pane_focus_dir(0, 1); }
+static void cmd_pane_up(void)          { pane_focus_dir(-1, 0); }
+static void cmd_pane_down(void)        { pane_focus_dir(1, 0); }
+
 static void cmd_palette(void);
 static void cmd_keys(void);
+static void cmd_pane(void);
 
 /* -------------------------------------------------------------- tables --- */
 
@@ -114,6 +129,7 @@ static const Command COMMANDS[] = {
     {"cursor.linestart",  "Go to start of line",        editor_line_start,      NULL},
     {"cursor.lineend",    "Go to end of line",          editor_line_end,        NULL},
     {"cursor.click",      "Move cursor to click",       editor_mouse_click,     NULL},
+    {"cursor.drag",       "Select by dragging",         editor_mouse_drag,      NULL},
     {"cursor.wheelup",    "Scroll up",                  editor_wheel_up,        NULL},
     {"cursor.wheeldown",  "Scroll down",                editor_wheel_down,      NULL},
 
@@ -122,6 +138,9 @@ static const Command COMMANDS[] = {
     {"edit.delete",       "Delete forward",             editor_delete_forward,  NULL},
     {"edit.undo",         "Undo",                       editor_undo,            NULL},
     {"edit.redo",         "Redo",                       editor_redo,            NULL},
+    {"edit.cut",          "Cut selection",              editor_cut,             NULL},
+    {"edit.copy",         "Copy selection",             editor_copy,            NULL},
+    {"edit.paste",        "Paste",                      editor_paste,           NULL},
 
     {"file.save",         "Save file",                  editor_save,            NULL},
     {"file.open",         "Open file...",               cmd_file_open,          NULL},
@@ -132,6 +151,15 @@ static const Command COMMANDS[] = {
     {"buffer.prev",       "Previous buffer",            cmd_buffer_prev,        avail_many_buffers},
     {"buffer.close",      "Close buffer",               cmd_buffer_close,       NULL},
     {"buffer.list",       "Switch buffer...",           cmd_buffer_list,        avail_many_buffers},
+
+    {"pane.prefix",       "Pane...",                    cmd_pane,               NULL},
+    {"pane.split.right",  "Split pane right",           cmd_pane_split_right,   NULL},
+    {"pane.split.down",   "Split pane down",            cmd_pane_split_down,    NULL},
+    {"pane.left",         "Focus pane left",            cmd_pane_left,          avail_many_panes},
+    {"pane.right",        "Focus pane right",           cmd_pane_right,         avail_many_panes},
+    {"pane.up",           "Focus pane above",           cmd_pane_up,            avail_many_panes},
+    {"pane.down",         "Focus pane below",           cmd_pane_down,          avail_many_panes},
+    {"pane.close",        "Close pane",                 pane_close,             avail_many_panes},
 
     {"multicursor.above", "Add cursor above",           editor_cursor_add_above, NULL},
     {"multicursor.below", "Add cursor below",           editor_cursor_add_below, NULL},
@@ -160,8 +188,15 @@ typedef struct {
     const char *id;
 } Binding;
 
-/* The defaults. keys.conf rebinds on top of a copy of this table. The Ctrl
- * choices avoid the ones VS Code's integrated terminal tends to intercept. */
+/* The defaults. keys.conf rebinds on top of a copy of this table.
+ *
+ * A key the terminal keeps for itself never arrives, so the ones that matter
+ * most sit where both VS Code's terminal and Windows Terminal let them through.
+ * VS Code keeps Ctrl-K (its chords), Ctrl-J (its panel), Ctrl-Q (Quick Open
+ * View), Ctrl-P and Ctrl-E (Go to File); Windows Terminal keeps Ctrl-Shift-K
+ * (Clear Buffer). Ctrl-Shift-letter only exists in terminals that report it,
+ * as VS Code's does through the kitty keyboard protocol, so quit also keeps
+ * the plain Ctrl-Q byte that the others send for it. */
 static const Binding BINDINGS[] = {
     {ARROW_LEFT,        "cursor.left"},
     {ARROW_RIGHT,       "cursor.right"},
@@ -174,6 +209,7 @@ static const Binding BINDINGS[] = {
     {HOME_KEY,          "cursor.linestart"},
     {END_KEY,           "cursor.lineend"},
     {MOUSE_CLICK,       "cursor.click"},
+    {MOUSE_DRAG,        "cursor.drag"},
     {WHEEL_UP,          "cursor.wheelup"},
     {WHEEL_DOWN,        "cursor.wheeldown"},
 
@@ -183,6 +219,9 @@ static const Binding BINDINGS[] = {
     {DEL_KEY,           "edit.delete"},
     {CTRL_KEY('z'),     "edit.undo"},
     {CTRL_KEY('y'),     "edit.redo"},
+    {CTRL_KEY('x'),     "edit.cut"},
+    {CTRL_KEY('c'),     "edit.copy"},
+    {CTRL_KEY('v'),     "edit.paste"},                  // the terminal's own paste arrives bracketed
 
     {CTRL_KEY('s'),     "file.save"},
     {CTRL_KEY('o'),     "file.open"},
@@ -193,6 +232,8 @@ static const Binding BINDINGS[] = {
     {CTRL_KEY('p'),     "buffer.prev"},
     {CTRL_KEY('w'),     "buffer.close"},
     {CTRL_KEY('b'),     "buffer.list"},
+
+    {CTRL_KEY(']'),     "pane.prefix"},
 
     {CTRL_ARROW_UP,     "multicursor.above"},
     {CTRL_ARROW_DOWN,   "multicursor.below"},
@@ -206,9 +247,11 @@ static const Binding BINDINGS[] = {
     {CTRL_KEY('e'),     "lsp.diag.next"},
     {CTRL_KEY('a'),     "lsp.diag.prev"},
 
-    {CTRL_KEY('k'),     "editor.palette"},
-    {CTRL_SHIFT_KEY('k'), "editor.keys"},               // only in terminals that can tell it from Ctrl-K
-    {CTRL_KEY('x'),     "editor.quit"},
+    {CTRL_KEY('\\'),    "editor.palette"},              // first, so it is the one the legend shows
+    {CTRL_KEY('k'),     "editor.palette"},              // everywhere but VS Code
+    {CTRL_KEY('u'),     "editor.keys"},
+    {CTRL_SHIFT_KEY('q'), "editor.quit"},               // first, so it is the one the legend shows
+    {CTRL_KEY('q'),     "editor.quit"},                 // how terminals that can't report Shift send it
 };
 
 #define NBINDINGS (int)(sizeof(BINDINGS) / sizeof(BINDINGS[0]))
@@ -220,13 +263,32 @@ static const int LOCKED_KEYS[] = {
     ARROW_LEFT, ARROW_RIGHT, ARROW_UP, ARROW_DOWN,
     CTRL_ARROW_LEFT, CTRL_ARROW_RIGHT,
     HOME_KEY, END_KEY, PAGE_UP, PAGE_DOWN,
-    MOUSE_CLICK, WHEEL_UP, WHEEL_DOWN,
+    MOUSE_CLICK, MOUSE_DRAG, WHEEL_UP, WHEEL_DOWN,
     '\r', '\t', '\x1b', BACKSPACE, CTRL_KEY('h'), DEL_KEY,
     CTRL_KEY('z'), CTRL_KEY('y'),                       // undo, redo
-    CTRL_KEY('c'), CTRL_KEY('v'),                       // reserved for copy and paste
+    CTRL_KEY('x'), CTRL_KEY('c'), CTRL_KEY('v'),        // cut, copy, paste
 };
 
 #define NLOCKED (int)(sizeof(LOCKED_KEYS) / sizeof(LOCKED_KEYS[0]))
+
+/* What the key after the pane prefix does: tmux's own defaults, so anyone who
+ * has used tmux already knows them. Fixed, like tmux's; each command can also be
+ * given a key of its own in keys.conf. */
+static const struct {
+    int key;
+    const char *label;
+    const char *id;
+} PANE_KEYS[] = {
+    {'%',         "%",     "pane.split.right"},
+    {'"',         "\"",    "pane.split.down"},
+    {ARROW_LEFT,  "Left",  "pane.left"},
+    {ARROW_RIGHT, "Right", "pane.right"},
+    {ARROW_UP,    "Up",    "pane.up"},
+    {ARROW_DOWN,  "Down",  "pane.down"},
+    {'x',         "x",     "pane.close"},
+};
+
+#define NPANE_KEYS (int)(sizeof(PANE_KEYS) / sizeof(PANE_KEYS[0]))
 
 // the live keymap: BINDINGS plus whatever keys.conf changed
 static Binding *keymap = NULL;
@@ -261,18 +323,20 @@ static void key_label(int key, char *out, size_t n) {
         case HOME_KEY:        snprintf(out, n, "Home");      return;
         case END_KEY:         snprintf(out, n, "End");       return;
         case MOUSE_CLICK:     snprintf(out, n, "Click");     return;
+        case MOUSE_DRAG:      snprintf(out, n, "Drag");      return;
         case WHEEL_UP:        snprintf(out, n, "WheelUp");   return;
         case WHEEL_DOWN:      snprintf(out, n, "WheelDn");   return;
         default: break;
     }
 
-    if (key >= 1 && key <= 26) snprintf(out, n, "Ctrl-%c", 'A' + key - 1);
+    if (key >= 1 && key < 32) snprintf(out, n, "Ctrl-%c", '@' + key);   // Ctrl-A..Z, Ctrl-\ and Ctrl-]
     else if (key >= CTRL_SHIFT_A && key < CTRL_SHIFT_A + 26)
         snprintf(out, n, "Ctrl-Shift-%c", 'A' + key - CTRL_SHIFT_A);
     else snprintf(out, n, " ");
 }
 
-/** First key bound to a command, for display in the palette. */
+/** First key bound to a command, for display in the palette. A pane command with
+ * no key of its own shows the prefix and the key after it. */
 static void binding_label(const char *id, char *out, size_t n) {
     for (int i = 0; i < nkeymap; i++) {
         if (strcmp(keymap[i].id, id) == 0) {
@@ -281,6 +345,38 @@ static void binding_label(const char *id, char *out, size_t n) {
         }
     }
     out[0] = '\0';
+
+    for (int i = 0; i < NPANE_KEYS; i++) {
+        if (strcmp(PANE_KEYS[i].id, id) != 0) continue;
+
+        char prefix[24];
+        binding_label("pane.prefix", prefix, sizeof(prefix));
+        if (prefix[0]) snprintf(out, n, "%s %s", prefix, PANE_KEYS[i].label);
+        return;
+    }
+}
+
+/**
+ * tmux's prefix: one key that means "the next key is about panes". It costs one
+ * binding rather than seven.
+ */
+static void cmd_pane(void) {
+    editor_set_status_message("Pane: %% split right, \" split down, arrows move, x close");
+
+    int key;
+    do {
+        editor_refresh_screen();
+        key = editor_read_key();
+    } while (key == -1);                                // read timeout, not a keypress
+    editor_set_status_message("");
+
+    for (int i = 0; i < NPANE_KEYS; i++) {
+        if (PANE_KEYS[i].key != key) continue;
+
+        const Command *c = find_command(PANE_KEYS[i].id);
+        if (c->avail == NULL || c->avail()) c->fn();
+        return;
+    }
 }
 
 /* ------------------------------------------------------------- palette --- */

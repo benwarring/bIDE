@@ -52,20 +52,20 @@ typedef struct {
     const struct editorSyntax *syntax;
     UndoState *undo;
     LspDoc *lsp;                // server-side view of this file: version, diagnostics
+    bpos last;                  // where the last view to leave this file had its cursor,
+    int last_rowoff;            // and its scroll, so coming back lands where you left off
 } Buffer;
 
 /**
  * Per-view state: which buffer, where the cursor is, where the window is
- * scrolled to.
+ * scrolled to. One per pane.
  *
- * Cursor lives here rather than in Buffer even though there is exactly one view
- * per buffer today. Split panes means two views onto the *same* file, each
- * needing its own cursor and scroll offset; putting it here now costs nothing
- * and keeps that an additive change. Same hedge as keeping `rx` around in
- * Milestone 1 while it still equalled `cx`.
+ * Cursor lives here rather than in Buffer because two panes onto the *same*
+ * file each need their own cursor and scroll offset.
  *
  * (cy, cx) is the primary cursor: the one scrolling follows and the one that
- * survives collapsing. `extra` holds any additional cursors.
+ * survives collapsing. `extra` holds any additional cursors. A selection runs
+ * from `anchor` to the primary cursor, and only exists with no extras.
  */
 typedef struct {
     Buffer *buf;
@@ -74,17 +74,19 @@ typedef struct {
     int rowoff, coloff;
     bpos *extra;
     int nextra;
+    bpos anchor;                // where the selection started, while `selecting`
+    int selecting;
+    int top, left;              // the pane's text area on screen, 0-indexed, laid out each render;
+    int rows, cols;             // its gutter is inside, its status bar just below
+    int gutter;                 // width of the line number column, recomputed each render
 } View;
 
 typedef struct {
-    int screenrows, screencols; // text area size (status bar + message line already excluded)
-    int gutter;                 // width of the line number column, recomputed each render
+    int screenrows, screencols; // a lone pane's text area: the screen less its status bar and the message line
 
     Buffer **bufs;
     int nbufs;
-    View **views;               // one per buffer for now; index-parallel to bufs
-    int nviews;
-    int active;
+    View *view;                 // the focused pane's; pane.c owns every view
 
     char statusmsg[128];
     time_t statusmsg_time;
@@ -113,8 +115,10 @@ enum editorKey {
     PAGE_UP,
     PAGE_DOWN,
     MOUSE_CLICK,
+    MOUSE_DRAG,                 // moved with the left button held
     WHEEL_UP,
     WHEEL_DOWN,
+    PASTE,                      // a bracketed paste arrived; its text is waiting in input.c
     CTRL_SHIFT_A                // through CTRL_SHIFT_A + 25; keep this last
 };
 

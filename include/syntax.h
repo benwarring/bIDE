@@ -22,7 +22,7 @@ enum editorHighlight {
     HL_NUMBER,
     HL_FUNCTION,
     HL_MATCH,
-    HL_CURSOR                   // an extra cursor, drawn as a reverse-video block
+    HL_CURSOR                   // an extra cursor or the selection, drawn in reverse video
 };
 
 #define HL_HIGHLIGHT_NUMBERS   (1 << 0)

@@ -26,6 +26,13 @@ void enable_raw_mode(void);
 /** For when there is no startup effect to do it as part of its last frame. */
 void enter_alt_screen(void);
 
+/**
+ * Puts text on the system clipboard by asking the terminal to (OSC 52). It is
+ * the one route that reaches the real clipboard from inside WSL or over SSH
+ * alike; a terminal that does not support it ignores it.
+ */
+void terminal_set_clipboard(const char *s, size_t n);
+
 int die(const char *s);
 
 int get_window_size(int *rows, int *cols);

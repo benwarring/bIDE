@@ -10,6 +10,7 @@
 #include "editor.h"
 #include "input.h"
 #include "lsp.h"
+#include "pane.h"
 #include "rain.h"
 #include "render.h"
 #include "terminal.h"
@@ -23,13 +24,12 @@ EditorConfig E;
  *
  * Every module reaches per-file and per-cursor state through these two rather
  * than through globals, which is what let the single-buffer code survive the
- * split: the call sites did not change, only what they resolve to. It is also
- * the seam split panes will need — a second view onto the same buffer only has
- * to change what editor_view() returns.
+ * split: the call sites did not change, only what they resolve to. Panes are
+ * the same trick again: focusing a pane, or drawing one, is nothing more than
+ * changing what editor_view() returns.
  */
 View *editor_view(void) {
-    if (E.active < 0 || E.active >= E.nviews) return NULL;
-    return E.views[E.active];
+    return E.view;
 }
 
 Buffer *editor_buffer(void) {
@@ -40,21 +40,19 @@ Buffer *editor_buffer(void) {
 void editor_init(void) {
     E.bufs = NULL;
     E.nbufs = 0;
-    E.views = NULL;
-    E.nviews = 0;
-    E.active = 0;
-    E.gutter = 0;
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
 
     update_window_size();
     install_winch_handler();
+    pane_init();
 }
 
 static void cleanup(void) {
     lsp_stop_all();                                     // handshake, then reap, before anything is freed
     lsp_features_free();
-    buffer_free();                                      // every buffer's rows, undo stacks and views
+    buffer_free();                                      // every buffer's rows and undo stacks
+    pane_free();                                        // the split tree and every pane's view
     render_free();
     command_free();                                     // the list widget's scratch and the file cache
 }

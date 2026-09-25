@@ -9,7 +9,9 @@
 #include "buffer.h"
 #include "command.h"
 #include "editor.h"
+#include "input.h"
 #include "lsp.h"
+#include "pane.h"
 #include "syntax.h"
 #include "undo.h"
 #include "wrappers.h"
@@ -38,6 +40,17 @@ static void ab_append(abuf *ab, const char *s, size_t len) {
 
 static void ab_appendstr(abuf *ab, const char *s) {
     ab_append(ab, s, strlen(s));
+}
+
+static void ab_pad(abuf *ab, int from, int to) {
+    for (int i = from; i < to; i++) ab_appendstr(ab, " ");
+}
+
+// the one place 0-indexed screen cells become 1-indexed terminal coordinates
+static void move_to(abuf *ab, int row, int col) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row + 1, col + 1);
+    ab_append(ab, buf, (size_t)n);
 }
 
 // scratch space for materializing one line, and its highlights, per draw
@@ -105,10 +118,7 @@ static void draw_popup(abuf *ab) {
         int idx = popup->top + i;
         if (idx >= popup->nitems) break;
 
-        char pos[32];
-        snprintf(pos, sizeof(pos), "\x1b[%d;%dH", row + i + 1, col + 1);
-        ab_appendstr(ab, pos);
-
+        move_to(ab, row + i, col);
         ab_appendstr(ab, idx == popup->selected ? "\x1b[7m" : "\x1b[100m");
 
         char line[512];
@@ -117,7 +127,7 @@ static void draw_popup(abuf *ab) {
         int len = (int)strlen(line);
         if (len > width) len = width;
         ab_append(ab, line, (size_t)len);
-        for (int j = len; j < width; j++) ab_appendstr(ab, " ");
+        ab_pad(ab, len, width);
 
         ab_appendstr(ab, "\x1b[m");
     }
@@ -169,34 +179,37 @@ static int compute_gutter(void) {
 
     int w = digits + GUTTER_SEP_W;
     if (w < GUTTER_MIN) w = GUTTER_MIN;
-    if (w > E.screencols - 1) w = E.screencols - 1;     // pathologically narrow window
+    if (w > editor_view()->cols - 1) w = editor_view()->cols - 1;   // pathologically narrow pane
     if (w < 0) w = 0;
     return w;
 }
 
 // width available for line content, once the gutter has taken its share
 static int text_cols(void) {
-    int w = E.screencols - E.gutter;
+    View *v = editor_view();
+    int w = v->cols - v->gutter;
     return w < 1 ? 1 : w;
 }
 
 void editor_scroll(void) {
     View *v = editor_view();
 
-    // deleting rows can leave the cursor past the end; clamp before anything
-    // reads through it, since this runs before every render
+    // deleting text, here or in another pane onto the same file, can leave the
+    // cursor past the end; clamp before anything reads through it, since this
+    // runs for every pane before every render
     if (v->cy > buffer_num_lines() - 1) v->cy = buffer_num_lines() - 1;
     if (v->cy < 0) v->cy = 0;
+    if (v->cx > buffer_line_length(v->cy)) v->cx = buffer_line_length(v->cy);
     if (v->rowoff > v->cy) v->rowoff = v->cy;
 
-    E.gutter = compute_gutter();                        // before any screen-column arithmetic
+    v->gutter = compute_gutter();                       // before any screen-column arithmetic
     v->rx = buffer_cx_to_rx(v->cy, v->cx);
 
     if (v->cy < v->rowoff) {
         v->rowoff = v->cy;
     }
-    if (v->cy >= v->rowoff + E.screenrows) {
-        v->rowoff = v->cy - E.screenrows + 1;
+    if (v->cy >= v->rowoff + v->rows) {
+        v->rowoff = v->cy - v->rows + 1;
     }
     if (v->rx < v->coloff) {
         v->coloff = v->rx;
@@ -236,11 +249,12 @@ static int diag_color(int severity) {
 }
 
 static void draw_gutter(abuf *ab, int filerow) {
-    if (E.gutter == 0) return;
+    int gutter = editor_view()->gutter;
+    if (gutter == 0) return;
 
     char num[32];
     if (filerow < 0) {
-        snprintf(num, sizeof(num), "%*s", E.gutter, "");    // blank gutter for tilde rows
+        snprintf(num, sizeof(num), "%*s", gutter, "");      // blank gutter for tilde rows
         ab_appendstr(ab, num);
         return;
     }
@@ -248,7 +262,7 @@ static void draw_gutter(abuf *ab, int filerow) {
     int current = (filerow == editor_view()->cy);
     int severity = lsp_line_severity(editor_buffer(), filerow);
 
-    snprintf(num, sizeof(num), "%*d ", E.gutter - GUTTER_SEP_W, filerow + 1);
+    snprintf(num, sizeof(num), "%*d ", gutter - GUTTER_SEP_W, filerow + 1);
     if (!current) ab_appendstr(ab, "\x1b[90m");
     ab_appendstr(ab, num);
     if (!current) ab_appendstr(ab, "\x1b[39m");
@@ -269,9 +283,9 @@ static void draw_gutter(abuf *ab, int filerow) {
 }
 
 /**
- * Paints the extra cursors onto the *copy* of the highlight array, never the
- * buffer's own. They are view state, not file state, and this is the same
- * override mechanism search matches use — its third consumer.
+ * Paints the extra cursors and the selection onto the *copy* of the highlight
+ * array, never the buffer's own. They are view state, not file state, and this
+ * is the same override mechanism search matches use.
  */
 static void mark_extra_cursors(int filerow, int rsize) {
     View *v = editor_view();
@@ -282,13 +296,21 @@ static void mark_extra_cursors(int filerow, int rsize) {
         int rx = buffer_cx_to_rx(filerow, v->extra[i].cx);
         if (rx >= 0 && rx < rsize) hlbuf[rx] = HL_CURSOR;
     }
+
+    bpos s, e;
+    if (!editor_selection(&s, &e) || filerow < s.cy || filerow > e.cy) return;
+
+    int from = filerow == s.cy ? buffer_cx_to_rx(filerow, s.cx) : 0;
+    int to = filerow == e.cy ? buffer_cx_to_rx(filerow, e.cx) : rsize;
+    for (int rx = from; rx < to && rx < rsize; rx++) hlbuf[rx] = HL_CURSOR;
 }
 
 /**
- * Whether an extra cursor sits just past the last character of the row. There is
+ * Whether the cell just past the last character of the row is inverted: an extra
+ * cursor parked there, or a selection carrying on past the line break. There is
  * no character there to invert, so the highlight array cannot carry it and the
  * row loop has to draw a cell of its own — without which a cursor added onto a
- * shorter line simply vanishes while still editing.
+ * shorter line vanishes, and a selected blank line looks unselected.
  */
 static int extra_cursor_at_eol(int filerow, int rsize) {
     View *v = editor_view();
@@ -297,7 +319,9 @@ static int extra_cursor_at_eol(int filerow, int rsize) {
         if (v->extra[i].cy != filerow) continue;
         if (buffer_cx_to_rx(filerow, v->extra[i].cx) == rsize) return 1;
     }
-    return 0;
+
+    bpos s, e;
+    return editor_selection(&s, &e) && filerow >= s.cy && filerow < e.cy;
 }
 
 static void draw_overlay_row(abuf *ab, int y) {
@@ -323,32 +347,45 @@ static void draw_overlay_row(abuf *ab, int y) {
 
     ab_appendstr(ab, selected || y == 0 ? "\x1b[7m" : "\x1b[100m");
     ab_append(ab, line, (size_t)len);
-    for (int i = len; i < E.screencols; i++) ab_appendstr(ab, " ");
+    ab_pad(ab, len, E.screencols);
     ab_appendstr(ab, "\x1b[m");
 }
 
-static void draw_rows(abuf *ab) {
+/* Screen rows the overlay owns this frame, full width, over the top of every
+ * pane. Panes leave these rows alone rather than drawing text for the overlay to
+ * paint over: no cell may be written twice in one frame, because some terminals
+ * (Windows Terminal, through ConPTY) show a frame before it is finished, and the
+ * list redraws ten times a second, so the text underneath would flash through. */
+static int overlay_rows(void) {
+    if (overlay == NULL) return 0;
+    return overlay->height + 1 < E.screenrows ? overlay->height + 1 : E.screenrows;
+}
+
+static void draw_overlay(abuf *ab) {
+    for (int y = 0; y < overlay_rows(); y++) {
+        move_to(ab, y, 0);
+        draw_overlay_row(ab, y);
+    }
+}
+
+/**
+ * The text rows of the pane being drawn. Each row is placed by absolute addressing and
+ * padded out to the pane's width, because a pane beside another shares its
+ * screen lines: "\r\n" and erase-to-end-of-line would trample the neighbour.
+ * The padding does the erasing instead, and still avoids a full-screen flash.
+ */
+static void draw_rows(abuf *ab, const char *divider) {
     View *v = editor_view();
-    int overlay_rows = overlay ? overlay->height + 1 : 0;
+    int covered = overlay_rows();
 
-    for (int y = 0; y < E.screenrows; y++) {
-        // the overlay is drawn as part of the same frame, not a second write
-        if (overlay && y < overlay_rows) {
-            draw_overlay_row(ab, y);
-            ab_appendstr(ab, "\x1b[K");
-            ab_appendstr(ab, "\r\n");
-            continue;
-        }
-
+    for (int y = 0; y < v->rows; y++) {
+        if (v->top + y < covered) continue;
+        move_to(ab, v->top + y, v->left);
         int filerow = y + v->rowoff;
+        int used = v->gutter;
 
         if (filerow >= buffer_num_lines()) {
             draw_gutter(ab, -1);
-            if (editor_buffer()->filename == NULL && buffer_num_lines() <= 1 &&
-                y == E.screenrows / 3) {
-            } else {
-                ab_appendstr(ab, "");
-            }
         } else {
             draw_gutter(ab, filerow);
 
@@ -383,22 +420,29 @@ static void draw_rows(abuf *ab) {
             }
             if (current_color != -1) ab_appendstr(ab, "\x1b[27m\x1b[39m");
 
+            used += visible;
+
             // the cell just past the end of the line, for a cursor parked there
             int eol_col = linelen - v->coloff;
             if (eol_col >= 0 && eol_col < text_cols() && extra_cursor_at_eol(filerow, linelen)) {
                 ab_appendstr(ab, "\x1b[7m \x1b[27m");
+                used++;
             }
         }
 
-        ab_appendstr(ab, "\x1b[K");                     // clear to end of line, avoids a full-screen flash
-        ab_appendstr(ab, "\r\n");
+        ab_pad(ab, used, v->cols);
+        ab_appendstr(ab, divider);
     }
 }
 
-static void draw_status_bar(abuf *ab) {
-    ab_appendstr(ab, "\x1b[7m");                        // inverted video
-
+/* Inverted for the focused pane; the others' go grey, which is how you tell
+ * which one the keyboard is talking to. */
+static void draw_status_bar(abuf *ab, int focused, const char *divider) {
     View *v = editor_view();
+    if (v->top + v->rows < overlay_rows()) return;
+    move_to(ab, v->top + v->rows, v->left);
+    ab_appendstr(ab, focused ? "\x1b[7m" : "\x1b[90;7m");
+
     Buffer *b = editor_buffer();
 
     char status[120], rstatus[80];
@@ -416,11 +460,11 @@ static void draw_status_bar(abuf *ab) {
                         lsp ? lsp : "", lsp ? " | " : "",
                         syntax_filetype(), v->cy + 1, buffer_num_lines());
 
-    if (len > E.screencols) len = E.screencols;
+    if (len > v->cols) len = v->cols;
     ab_append(ab, status, (size_t)len);
 
-    while (len < E.screencols) {
-        if (E.screencols - len == rlen) {
+    while (len < v->cols) {
+        if (v->cols - len == rlen) {
             ab_append(ab, rstatus, (size_t)rlen);
             break;
         }
@@ -429,7 +473,7 @@ static void draw_status_bar(abuf *ab) {
     }
 
     ab_appendstr(ab, "\x1b[m");
-    ab_appendstr(ab, "\r\n");
+    ab_appendstr(ab, divider);
 }
 
 static void draw_message_bar(abuf *ab) {
@@ -488,29 +532,38 @@ void editor_refresh_screen(void) {
 }
 
 char *render_frame(size_t *len) {
-    editor_scroll();
-
     abuf ab = ABUF_INIT;
 
     ab_appendstr(&ab, "\x1b[?25l");                     // hide cursor while drawing
-    ab_appendstr(&ab, "\x1b[H");
 
-    draw_rows(&ab);
-    draw_status_bar(&ab);
+    /* Everything that draws a pane reads it through editor_view(), so each pane
+     * is drawn by making it the view for a moment, then focus is put back. */
+    View *focus = editor_view();
+    int n;
+    View **views = pane_views(&n);
+    for (int i = 0; i < n; i++) {
+        E.view = views[i];
+        editor_scroll();
+
+        // a pane short of the right edge has its neighbour's divider just after it
+        const char *divider = views[i]->left + views[i]->cols < E.screencols
+                              ? "\x1b[90m\xe2\x94\x82\x1b[39m" : "";
+        draw_rows(&ab, divider);
+        draw_status_bar(&ab, views[i] == focus, divider);
+    }
+    E.view = focus;
+
+    if (overlay) draw_overlay(&ab);
+    move_to(&ab, E.screenrows + 1, 0);
     draw_message_bar(&ab);
     draw_popup(&ab);                                    // floats over what is already there
 
-    // the one place 0-indexed state becomes 1-indexed terminal coordinates
     View *v = editor_view();
-    char buf[32];
     if (overlay) {
-        snprintf(buf, sizeof(buf), "\x1b[1;%dH",
-                 (int)(strlen(overlay->title) + strlen(overlay->query) + 5));
+        move_to(&ab, 0, (int)(strlen(overlay->title) + strlen(overlay->query) + 4));
     } else {
-        snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-                 (v->cy - v->rowoff) + 1, (v->rx - v->coloff) + E.gutter + 1);
+        move_to(&ab, v->top + v->cy - v->rowoff, v->left + v->gutter + v->rx - v->coloff);
     }
-    ab_appendstr(&ab, buf);
 
     ab_appendstr(&ab, "\x1b[?25h");
 
